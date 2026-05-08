@@ -75,6 +75,10 @@ OUR BIKES AND PRICES (starting from per day):
 - Yamaha Xmax 300cc (2022-2025): 800 THB/day
 - Honda ADV 350cc (2022-2025): 850 THB/day
 
+DELIVERY & PICKUP:
+- We deliver and pick up within Chaweng and Bo Put area only (max 25 minutes away)
+- Outside this area: customer must come to our shop in Chaweng
+
 INCLUDED: Helmet provided, optional comprehensive insurance available. No hidden fees.
 
 BOOKING: Collect full name, phone number, bike type, rental start date, rental end date, pickup location.
@@ -129,4 +133,5 @@ async function sendWhatsApp(to, message) {
 }
 
 app.listen(3000, () => console.log('TOH Rental Bot running on port 3000'));
+
 
