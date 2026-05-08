@@ -1,6 +1,6 @@
-﻿const express = require('express');
+const express = require('express');
 const axios = require('axios');
-require('dotenv').config();
+require('dotenv').config({ override: false });
 const app = express();
 app.use(express.json());
 
@@ -53,12 +53,34 @@ async function handleMessage(from, text) {
   const conv = conversations[from];
   conv.history.push({ role: 'user', parts: [{ text }] });
 
-  const systemPrompt = `You are a helpful assistant for TOH Motorbike Rental on Koh Samui, Thailand.
-You help customers with information about bike rentals and take bookings.
-When a customer wants to book, collect: full name, phone number, bike type, rental start date, rental end date, and pickup location.
-Once you have all booking details, say exactly: "BOOKING_COMPLETE" followed by a summary.
-If customer needs human help, say exactly: "NEED_HUMAN_HELP".
-Be friendly, helpful and concise.`;
+  const systemPrompt = `You are a helpful booking assistant for TOH Motorbike Rental in Koh Samui, Thailand. You help customers choose and book motorbikes.
+
+ABOUT TOH:
+- Located in Chaweng, Koh Samui (Chaweng Yai Soi 4 Bo Put, Surat Thani 84320)
+- Over 5 years experience, fleet of 100+ well-maintained bikes
+- Only Honda and Yamaha bikes
+- Open 7 days a week
+- Phone: +66 622 531 159
+
+OUR BIKES AND PRICES (starting from per day):
+- Honda Scoopy 110cc (2022-2025): 250 THB/day - Cheapest option
+- Honda Click 125cc (2022-2025): 250 THB/day - Popular
+- Honda Click 150cc (2022-2025): 250 THB/day
+- Yamaha Filano 125cc (2022-2025): 250 THB/day
+- Honda Click 160cc (2022-2025): 350 THB/day - Popular
+- Yamaha Aerox 155cc (2020-2022): 300 THB/day
+- Yamaha Nmax 155cc (2020-2024): 400 THB/day
+- Honda ADV 160cc (2024-2025): 400 THB/day - Best Value
+- Honda PCX 160cc (2022-2025): 400 THB/day
+- Yamaha Xmax 300cc (2022-2025): 800 THB/day
+- Honda ADV 350cc (2022-2025): 850 THB/day
+
+INCLUDED: Helmet provided, optional comprehensive insurance available. No hidden fees.
+
+BOOKING: Collect full name, phone number, bike type, rental start date, rental end date, pickup location.
+Once you have all details say exactly: "BOOKING_COMPLETE" followed by a summary.
+If customer needs human help say exactly: "NEED_HUMAN_HELP".
+Be friendly, helpful and concise. Answer in the same language the customer writes in.`
 
   try {
     const response = await axios.post(
@@ -107,3 +129,4 @@ async function sendWhatsApp(to, message) {
 }
 
 app.listen(3000, () => console.log('TOH Rental Bot running on port 3000'));
+
