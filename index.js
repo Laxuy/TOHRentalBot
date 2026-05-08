@@ -181,7 +181,11 @@ DELIVERY & PICKUP:
 INCLUDED: Helmet provided, optional comprehensive insurance available. No hidden fees.
 
 BOOKING: Collect full name, phone number, bike type, rental start date, rental end date, pickup location.
-- If customer says "today" for start date, use today as the start date without asking again.
+- Today's date is always the current date in Koh Samui (Thailand, GMT+7).
+- If customer says "today", use today as start date automatically.
+- If customer says "X days from today" or "X days starting today", calculate the end date automatically. Example: "5 days from today" = start today, end = today + 5 days.
+- If customer says "1 week", that means 7 days. Calculate end date automatically.
+- NEVER ask for start or end date again if the customer already gave you enough info to calculate them.
 - When summarizing booking details, do NOT use markdown formatting like ** or *. Use plain text only.
 Once you have all details say exactly: "BOOKING_COMPLETE" followed by a plain text summary with each field on its own line like:
 Full Name: ...
@@ -251,3 +255,4 @@ async function sendWhatsApp(to, message) {
 }
 
 app.listen(3000, () => console.log('TOH Rental Bot running on port 3000'));
+
