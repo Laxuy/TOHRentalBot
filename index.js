@@ -82,6 +82,7 @@ DELIVERY & PICKUP:
 INCLUDED: Helmet provided, optional comprehensive insurance available. No hidden fees.
 
 BOOKING: Collect full name, phone number, bike type, rental start date, rental end date, pickup location.
+- If customer says "today" for start date, use today as the start date without asking again.
 Once you have all details say exactly: "BOOKING_COMPLETE" followed by a summary.
 If customer needs human help say exactly: "NEED_HUMAN_HELP".
 Be friendly, helpful and concise. Answer in the same language the customer writes in.`
@@ -133,5 +134,6 @@ async function sendWhatsApp(to, message) {
 }
 
 app.listen(3000, () => console.log('TOH Rental Bot running on port 3000'));
+
 
 
