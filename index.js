@@ -16,7 +16,6 @@ const MY_NUMBER = process.env.MY_NUMBER;
 const conversations = {};
 const processedMessages = new Set();
 
-// Google Sheets auth
 const auth = new google.auth.GoogleAuth({
   credentials: {
     client_email: process.env.GOOGLE_CLIENT_EMAIL,
@@ -25,8 +24,37 @@ const auth = new google.auth.GoogleAuth({
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
 });
 
+function clean(str) {
+  if (!str) return '';
+  return str.replace(/\*\*/g, '').replace(/\*/g, '').trim();
+}
+
+async function ensureHeader() {
+  try {
+    const sheets = google.sheets({ version: 'v4', auth });
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: 'Sheet1!A1:I1',
+    });
+    const firstRow = res.data.values?.[0];
+    if (!firstRow || firstRow[0] !== 'Date') {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: 'Sheet1!A1:I1',
+        valueInputOption: 'USER_ENTERED',
+        resource: {
+          values: [['Date', 'Customer Name', 'Phone Number', 'Bike Type', 'Start Date', 'End Date', 'Pickup Location', 'Price', 'Source']]
+        }
+      });
+    }
+  } catch (err) {
+    console.error('Header error:', err.message);
+  }
+}
+
 async function appendToSheet(data) {
   try {
+    await ensureHeader();
     const sheets = google.sheets({ version: 'v4', auth });
     const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
     await sheets.spreadsheets.values.append({
@@ -36,13 +64,13 @@ async function appendToSheet(data) {
       resource: {
         values: [[
           now,
-          data.name || '',
-          data.phone || '',
-          data.bike || '',
-          data.startDate || '',
-          data.endDate || '',
-          data.location || '',
-          data.price || '',
+          clean(data.name),
+          clean(data.phone),
+          clean(data.bike),
+          clean(data.startDate),
+          clean(data.endDate),
+          clean(data.location),
+          clean(data.price),
           'WhatsApp Bot'
         ]]
       }
@@ -62,14 +90,15 @@ async function getTodayBookings() {
     });
     const rows = res.data.values || [];
     const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok' });
-    const todayRows = rows.filter(row => row[0] && row[0].includes(today.split('/').reverse().join('/')));
+    const todayRows = rows.filter(row => row[0] && row[0].startsWith(today));
     if (todayRows.length === 0) return 'No bookings today yet.';
     let msg = `*Today Bookings (${today}):*\n\n`;
     todayRows.forEach((row, i) => {
       msg += `${i+1}. ${row[3] || 'Unknown bike'}\n`;
       msg += `   Name: ${row[1] || '-'}\n`;
       msg += `   Phone: ${row[2] || '-'}\n`;
-      msg += `   ${row[4] || '-'} to ${row[5] || '-'}\n`;
+      msg += `   Start: ${row[4] || '-'}\n`;
+      msg += `   End: ${row[5] || '-'}\n`;
       msg += `   Location: ${row[6] || '-'}\n\n`;
     });
     return msg;
@@ -101,7 +130,6 @@ app.post('/webhook', async (req, res) => {
         const text = message.text.body.trim();
         console.log(`Message from ${from}: ${text}`);
 
-        // List today command
         if (text.toLowerCase() === 'list today' && from === MY_NUMBER) {
           const list = await getTodayBookings();
           await sendWhatsApp(from, list);
@@ -154,7 +182,15 @@ INCLUDED: Helmet provided, optional comprehensive insurance available. No hidden
 
 BOOKING: Collect full name, phone number, bike type, rental start date, rental end date, pickup location.
 - If customer says "today" for start date, use today as the start date without asking again.
-Once you have all details say exactly: "BOOKING_COMPLETE" followed by a summary.
+- When summarizing booking details, do NOT use markdown formatting like ** or *. Use plain text only.
+Once you have all details say exactly: "BOOKING_COMPLETE" followed by a plain text summary with each field on its own line like:
+Full Name: ...
+Phone Number: ...
+Bike Type: ...
+Start Date: ...
+End Date: ...
+Pickup Location: ...
+Price: ...
 If customer needs human help say exactly: "NEED_HUMAN_HELP".
 Be friendly, helpful and concise. Answer in the same language the customer writes in.`;
 
@@ -174,15 +210,14 @@ Be friendly, helpful and concise. Answer in the same language the customer write
       await sendWhatsApp(from, 'Booking confirmed!\n\n' + cleanReply);
       await sendWhatsApp(STAFF_GROUP_ID, `NEW BOOKING from +${from}:\n\n${cleanReply}`);
 
-      // Parse and log to Google Sheets
       const bookingData = {
-        name: cleanReply.match(/(?:Full Name|Name)[:\s]+([^\n]+)/i)?.[1]?.trim(),
-        phone: cleanReply.match(/(?:Phone|Phone Number)[:\s]+([^\n]+)/i)?.[1]?.trim() || from,
-        bike: cleanReply.match(/(?:Bike|Bike Type)[:\s]+([^\n]+)/i)?.[1]?.trim(),
-        startDate: cleanReply.match(/(?:Start Date|Rental Start)[:\s]+([^\n]+)/i)?.[1]?.trim(),
-        endDate: cleanReply.match(/(?:End Date|Rental End)[:\s]+([^\n]+)/i)?.[1]?.trim(),
-        location: cleanReply.match(/(?:Pickup|Location)[:\s]+([^\n]+)/i)?.[1]?.trim(),
-        price: cleanReply.match(/(?:Price|Rate)[:\s]+([^\n]+)/i)?.[1]?.trim(),
+        name: cleanReply.match(/Full Name[:\s]+([^\n]+)/i)?.[1],
+        phone: cleanReply.match(/Phone Number[:\s]+([^\n]+)/i)?.[1] || from,
+        bike: cleanReply.match(/Bike Type[:\s]+([^\n]+)/i)?.[1],
+        startDate: cleanReply.match(/Start Date[:\s]+([^\n]+)/i)?.[1],
+        endDate: cleanReply.match(/End Date[:\s]+([^\n]+)/i)?.[1],
+        location: cleanReply.match(/Pickup Location[:\s]+([^\n]+)/i)?.[1],
+        price: cleanReply.match(/Price[:\s]+([^\n]+)/i)?.[1],
       };
       await appendToSheet(bookingData);
       console.log(`Booking completed for ${from}`);
