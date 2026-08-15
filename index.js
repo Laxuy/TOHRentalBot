@@ -11,6 +11,7 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const STAFF_GROUP_ID = process.env.STAFF_GROUP_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const SHEET_ID = process.env.SHEET_ID;
+const FLEET_SHEET_ID = process.env.FLEET_SHEET_ID || '1o4HdfC97TqUyW0ODot7KxNvpceIlvXSO-1upihgEIKU';
 const MY_NUMBER = process.env.MY_NUMBER;
 
 const conversations = {};
@@ -119,21 +120,23 @@ async function getFleetAvailability(forceRefresh = false) {
   try {
     const sheets = google.sheets({ version: 'v4', auth });
     const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: 'Fleet!A2:D',
+      spreadsheetId: FLEET_SHEET_ID,
+      // Columns: Bike ID, Model, Color, Current Location, Status, Renter Name, Renter Phone, Rented Date, Expected Return, Returned Date, Notes
+      range: 'A2:K',
     });
     const rows = res.data.values || [];
     const byType = {};
     rows.forEach(row => {
-      const type = (row[0] || '').trim();
-      const plate = (row[1] || '').trim();
-      const status = (row[2] || '').trim().toLowerCase();
-      if (!type) return;
-      if (!byType[type]) byType[type] = { total: 0, available: 0, bikes: [] };
-      byType[type].total += 1;
+      const bikeId = (row[0] || '').trim();
+      const model = (row[1] || '').trim();
+      const color = (row[2] || '').trim();
+      const status = (row[4] || '').trim().toLowerCase();
+      if (!bikeId || !model) return;
+      if (!byType[model]) byType[model] = { total: 0, available: 0, bikes: [] };
+      byType[model].total += 1;
       const isAvailable = status === '' || status === 'available';
-      if (isAvailable) byType[type].available += 1;
-      byType[type].bikes.push({ plate, status: status || 'available' });
+      if (isAvailable) byType[model].available += 1;
+      byType[model].bikes.push({ bikeId, color, status: status || 'available' });
     });
     fleetCache = { data: byType, fetchedAt: now };
     return byType;
