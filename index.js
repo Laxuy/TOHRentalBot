@@ -108,6 +108,52 @@ async function getTodayBookings() {
   }
 }
 
+let fleetCache = { data: null, fetchedAt: 0 };
+const FLEET_CACHE_TTL_MS = 60 * 1000; // 1 minute
+
+async function getFleetAvailability(forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && fleetCache.data && (now - fleetCache.fetchedAt) < FLEET_CACHE_TTL_MS) {
+    return fleetCache.data;
+  }
+  try {
+    const sheets = google.sheets({ version: 'v4', auth });
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: 'Fleet!A2:D',
+    });
+    const rows = res.data.values || [];
+    const byType = {};
+    rows.forEach(row => {
+      const type = (row[0] || '').trim();
+      const plate = (row[1] || '').trim();
+      const status = (row[2] || '').trim().toLowerCase();
+      if (!type) return;
+      if (!byType[type]) byType[type] = { total: 0, available: 0, bikes: [] };
+      byType[type].total += 1;
+      const isAvailable = status === '' || status === 'available';
+      if (isAvailable) byType[type].available += 1;
+      byType[type].bikes.push({ plate, status: status || 'available' });
+    });
+    fleetCache = { data: byType, fetchedAt: now };
+    return byType;
+  } catch (err) {
+    console.error('Fleet sheet error:', err.message);
+    return fleetCache.data || {};
+  }
+}
+
+function formatFleetSummary(byType) {
+  const types = Object.keys(byType);
+  if (types.length === 0) return 'Fleet data unavailable right now.';
+  let msg = '';
+  types.forEach(type => {
+    const { total, available } = byType[type];
+    msg += `- ${type}: ${available}/${total} available\n`;
+  });
+  return msg;
+}
+
 app.get('/webhook', (req, res) => {
   if (req.query['hub.verify_token'] === VERIFY_TOKEN) {
     res.send(req.query['hub.challenge']);
@@ -136,6 +182,12 @@ app.post('/webhook', async (req, res) => {
           return res.sendStatus(200);
         }
 
+        if (text.toLowerCase() === 'fleet' && from === MY_NUMBER) {
+          const byType = await getFleetAvailability(true);
+          await sendWhatsApp(from, `*Fleet Availability:*\n\n${formatFleetSummary(byType)}`);
+          return res.sendStatus(200);
+        }
+
         await handleMessage(from, text);
       } else {
         await sendWhatsApp(from, 'Sorry, I can only read text messages. Please type your question.');
@@ -152,7 +204,14 @@ async function handleMessage(from, text) {
   const conv = conversations[from];
   conv.history.push({ role: 'user', parts: [{ text }] });
 
+  const fleetData = await getFleetAvailability();
+  const fleetSummary = formatFleetSummary(fleetData);
+
   const systemPrompt = `You are a helpful booking assistant for TOH Motorbike Rental in Koh Samui, Thailand. You help customers choose and book motorbikes.
+
+CURRENT LIVE FLEET AVAILABILITY (bike type: available/total bikes right now):
+${fleetSummary}
+If a bike type shows 0 available, tell the customer it's fully booked right now and suggest a similar available alternative. Match the customer's wording to the closest bike type in this list (e.g. "Click" or "click 125" means "Honda Click 125"). Never say a bike is available if its available count is 0.
 
 ABOUT TOH:
 - Located in Chaweng, Koh Samui (Chaweng Yai Soi 4 Bo Put, Surat Thani 84320)
@@ -255,4 +314,3 @@ async function sendWhatsApp(to, message) {
 }
 
 app.listen(3000, () => console.log('TOH Rental Bot running on port 3000'));
-
