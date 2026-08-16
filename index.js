@@ -17,6 +17,7 @@ const STAFF_NUMBERS = (process.env.STAFF_NUMBERS || '66950615202')
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const SHEET_ID = process.env.SHEET_ID;
 const FLEET_SHEET_ID = process.env.FLEET_SHEET_ID || '1XvSdL_oQvEZccji43kg-2C7BQgZLXi3Don2y-lZicuY';
+const CONTRACTS_FOLDER_ID = process.env.CONTRACTS_FOLDER_ID || '1r3YhaWFQl7hk2Y5WJY6rdPt3cLlLGIQ_';
 const MY_NUMBER = process.env.MY_NUMBER;
 
 const conversations = {};
@@ -27,7 +28,10 @@ const auth = new google.auth.GoogleAuth({
     client_email: process.env.GOOGLE_CLIENT_EMAIL,
     private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
   },
-  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+  scopes: [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive.file',
+  ],
 });
 
 function clean(str) {
@@ -210,6 +214,72 @@ async function getNearestBikes(custLat, custLon) {
   return msg;
 }
 
+async function downloadWhatsAppMedia(mediaId) {
+  // Step 1: get the temporary media URL from WhatsApp
+  const metaRes = await axios.get(
+    `https://graph.facebook.com/v19.0/${mediaId}`,
+    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+  );
+  const mediaUrl = metaRes.data.url;
+  const mimeType = metaRes.data.mime_type || 'image/jpeg';
+
+  // Step 2: download the actual bytes
+  const fileRes = await axios.get(mediaUrl, {
+    headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+    responseType: 'arraybuffer',
+  });
+  return { buffer: Buffer.from(fileRes.data), mimeType };
+}
+
+async function saveToDrive(buffer, mimeType, filename) {
+  const drive = google.drive({ version: 'v3', auth });
+  const { Readable } = require('stream');
+  const stream = Readable.from(buffer);
+  const res = await drive.files.create({
+    requestBody: {
+      name: filename,
+      parents: [CONTRACTS_FOLDER_ID],
+    },
+    media: {
+      mimeType,
+      body: stream,
+    },
+    fields: 'id, webViewLink',
+  });
+  return res.data;
+}
+
+async function forwardImageToStaff(mediaId, caption) {
+  await Promise.all(STAFF_NUMBERS.map(num =>
+    axios.post(
+      `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        to: num,
+        type: 'image',
+        image: { id: mediaId, caption },
+      },
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+    ).catch(err => console.error('Forward image error:', err.message))
+  ));
+}
+
+async function handleIncomingPhoto(from, mediaId) {
+  try {
+    const { buffer, mimeType } = await downloadWhatsAppMedia(mediaId);
+    const ext = mimeType.includes('png') ? 'png' : 'jpg';
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `${from}_${timestamp}.${ext}`;
+
+    await saveToDrive(buffer, mimeType, filename);
+    await forwardImageToStaff(mediaId, `📄 Photo from +${from}`);
+    await sendWhatsApp(from, 'Got it, saved ✅');
+  } catch (err) {
+    console.error('Photo handling error:', err.message);
+    await sendWhatsApp(from, "Sorry, I couldn't save that photo — please try sending it again.");
+  }
+}
+
 app.get('/webhook', (req, res) => {
   if (req.query['hub.verify_token'] === VERIFY_TOKEN) {
     res.send(req.query['hub.challenge']);
@@ -250,8 +320,12 @@ app.post('/webhook', async (req, res) => {
         console.log(`Location from ${from}: ${latitude}, ${longitude}`);
         const nearby = await getNearestBikes(latitude, longitude);
         await sendWhatsApp(from, nearby);
+      } else if (message.type === 'image') {
+        const mediaId = message.image.id;
+        console.log(`Image from ${from}: media ${mediaId}`);
+        await handleIncomingPhoto(from, mediaId);
       } else {
-        await sendWhatsApp(from, 'Sorry, I can only read text messages or shared locations. Please type your question, or share your location (tap 📎 attach → Location) so I can tell you the nearest available bikes.');
+        await sendWhatsApp(from, 'Sorry, I can only read text messages, photos, or shared locations. Please type your question, send a photo, or share your location (tap 📎 attach → Location) so I can tell you the nearest available bikes.');
       }
     }
   }
