@@ -11,7 +11,7 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const STAFF_GROUP_ID = process.env.STAFF_GROUP_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const SHEET_ID = process.env.SHEET_ID;
-const FLEET_SHEET_ID = process.env.FLEET_SHEET_ID || '1o4HdfC97TqUyW0ODot7KxNvpceIlvXSO-1upihgEIKU';
+const FLEET_SHEET_ID = process.env.FLEET_SHEET_ID || '1XvSdL_oQvEZccji43kg-2C7BQgZLXi3Don2y-lZicuY';
 const MY_NUMBER = process.env.MY_NUMBER;
 
 const conversations = {};
@@ -130,7 +130,7 @@ async function getFleetAvailability(forceRefresh = false) {
       const bikeId = (row[0] || '').trim();
       const model = (row[1] || '').trim();
       const color = (row[2] || '').trim();
-      const status = (row[4] || '').trim().toLowerCase();
+      const status = (row[9] || '').trim().toLowerCase();
       if (!bikeId || !model) return;
       if (!byType[model]) byType[model] = { total: 0, available: 0, bikes: [] };
       byType[model].total += 1;
@@ -153,6 +153,54 @@ function formatFleetSummary(byType) {
   types.forEach(type => {
     const { total, available } = byType[type];
     msg += `- ${type}: ${available}/${total} available\n`;
+  });
+  return msg;
+}
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const toRad = deg => (deg * Math.PI) / 180;
+  const R = 6371; // Earth radius km
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+async function getNearestBikes(custLat, custLon) {
+  const byType = await getFleetAvailability();
+  const sheets = google.sheets({ version: 'v4', auth });
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: FLEET_SHEET_ID,
+    range: 'A2:K',
+  });
+  const rows = res.data.values || [];
+  const results = [];
+  rows.forEach(row => {
+    const bikeId = (row[0] || '').trim();
+    const model = (row[1] || '').trim();
+    const location = (row[3] || '').trim(); // "lat,lon"
+    const status = (row[9] || '').trim().toLowerCase();
+    if (!bikeId || !location) return;
+    const isAvailable = status === '' || status === 'available';
+    if (!isAvailable) return;
+    const [latStr, lonStr] = location.split(',').map(s => s.trim());
+    const lat = parseFloat(latStr);
+    const lon = parseFloat(lonStr);
+    if (isNaN(lat) || isNaN(lon)) return;
+    const distKm = haversineKm(custLat, custLon, lat, lon);
+    results.push({ bikeId, model, distKm });
+  });
+  results.sort((a, b) => a.distKm - b.distKm);
+  if (results.length === 0) {
+    return "I couldn't find bike location data yet — let me connect you with staff to check what's nearest.";
+  }
+  const top = results.slice(0, 5);
+  let msg = '*Nearest available bikes to you:*\n\n';
+  top.forEach(b => {
+    msg += `- ${b.model} (${b.bikeId}): ${b.distKm.toFixed(1)} km away\n`;
   });
   return msg;
 }
@@ -192,8 +240,13 @@ app.post('/webhook', async (req, res) => {
         }
 
         await handleMessage(from, text);
+      } else if (message.type === 'location') {
+        const { latitude, longitude } = message.location;
+        console.log(`Location from ${from}: ${latitude}, ${longitude}`);
+        const nearby = await getNearestBikes(latitude, longitude);
+        await sendWhatsApp(from, nearby);
       } else {
-        await sendWhatsApp(from, 'Sorry, I can only read text messages. Please type your question.');
+        await sendWhatsApp(from, 'Sorry, I can only read text messages or shared locations. Please type your question, or share your location (tap 📎 attach → Location) so I can tell you the nearest available bikes.');
       }
     }
   }
@@ -216,6 +269,8 @@ CURRENT LIVE FLEET AVAILABILITY (bike type: available/total bikes right now):
 ${fleetSummary}
 If a bike type shows 0 available, tell the customer it's fully booked right now and suggest a similar available alternative. Match the customer's wording to the closest bike type in this list (e.g. "Click" or "click 125" means "Honda Click 125"). Never say a bike is available if its available count is 0.
 
+If a customer asks how far a bike is, where the nearest bike is, or anything about distance/location, ask them to share their location using WhatsApp's location-sharing feature (tap the attach/paperclip icon and choose Location). Do not guess distances yourself — the system will handle it once they share their pin.
+
 ABOUT TOH:
 - Located in Chaweng, Koh Samui (Chaweng Yai Soi 4 Bo Put, Surat Thani 84320)
 - Over 5 years experience, fleet of 100+ well-maintained bikes
@@ -225,16 +280,20 @@ ABOUT TOH:
 
 OUR BIKES AND PRICES (starting from per day):
 - Honda Scoopy 110cc (2022-2025): 250 THB/day - Cheapest option
-- Honda Click 125cc (2022-2025): 250 THB/day - Popular
+- Honda Click 125cc (2022-2026): 250 THB/day - Popular
 - Honda Click 150cc (2022-2025): 250 THB/day
 - Yamaha Filano 125cc (2022-2025): 250 THB/day
 - Honda Click 160cc (2022-2025): 350 THB/day - Popular
 - Yamaha Aerox 155cc (2020-2022): 300 THB/day
-- Yamaha Nmax 155cc (2020-2024): 400 THB/day
-- Honda ADV 160cc (2024-2025): 400 THB/day - Best Value
+- Yamaha Nmax 155cc (2021-2026): 400 THB/day
+- Honda ADV 160cc (2024-2026): 400 THB/day - Best Value
 - Honda PCX 160cc (2022-2025): 400 THB/day
 - Yamaha Xmax 300cc (2022-2025): 800 THB/day
 - Honda ADV 350cc (2022-2025): 850 THB/day
+- Honda XADV 750cc (2025): 2000 THB/day
+- Honda Forza: 750 THB/day
+
+If a customer asks about a bike not in this price list (e.g. Honda PCX with unconfirmed cc), do NOT make up a price. Tell them you'll need to check with staff for that model's price and offer to connect them.
 
 DELIVERY & PICKUP:
 - We deliver and pick up within Chaweng and Bo Put area only (max 25 minutes away)
