@@ -9,6 +9,11 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const STAFF_GROUP_ID = process.env.STAFF_GROUP_ID;
+// Comma-separated list of staff phone numbers (with country code, no +, e.g. "6695...,6681...") to broadcast notifications to.
+const STAFF_NUMBERS = (process.env.STAFF_NUMBERS || '66950615202')
+  .split(',')
+  .map(n => n.trim())
+  .filter(Boolean);
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const SHEET_ID = process.env.SHEET_ID;
 const FLEET_SHEET_ID = process.env.FLEET_SHEET_ID || '1XvSdL_oQvEZccji43kg-2C7BQgZLXi3Don2y-lZicuY';
@@ -227,13 +232,13 @@ app.post('/webhook', async (req, res) => {
         const text = message.text.body.trim();
         console.log(`Message from ${from}: ${text}`);
 
-        if (text.toLowerCase() === 'list today' && from === MY_NUMBER) {
+        if (text.toLowerCase() === 'list today' && STAFF_NUMBERS.includes(from)) {
           const list = await getTodayBookings();
           await sendWhatsApp(from, list);
           return res.sendStatus(200);
         }
 
-        if (text.toLowerCase() === 'fleet' && from === MY_NUMBER) {
+        if (text.toLowerCase() === 'fleet' && STAFF_NUMBERS.includes(from)) {
           const byType = await getFleetAvailability(true);
           await sendWhatsApp(from, `*Fleet Availability:*\n\n${formatFleetSummary(byType)}`);
           return res.sendStatus(200);
@@ -333,7 +338,7 @@ Be friendly, helpful and concise. Answer in the same language the customer write
     if (reply.includes('BOOKING_COMPLETE')) {
       const cleanReply = reply.replace('BOOKING_COMPLETE', '').trim();
       await sendWhatsApp(from, 'Booking confirmed!\n\n' + cleanReply);
-      await sendWhatsApp(STAFF_GROUP_ID, `NEW BOOKING from +${from}:\n\n${cleanReply}`);
+      await notifyStaff(`NEW BOOKING from +${from}:\n\n${cleanReply}`);
 
       const bookingData = {
         name: cleanReply.match(/Full Name[:\s]+([^\n]+)/i)?.[1],
@@ -348,7 +353,7 @@ Be friendly, helpful and concise. Answer in the same language the customer write
       console.log(`Booking completed for ${from}`);
     } else if (reply.includes('NEED_HUMAN_HELP')) {
       await sendWhatsApp(from, 'No problem! Our staff will contact you shortly.');
-      await sendWhatsApp(STAFF_GROUP_ID, `Customer +${from} needs human help!\nLast message: ${text}`);
+      await notifyStaff(`Customer +${from} needs human help!\nLast message: ${text}`);
     } else {
       await sendWhatsApp(from, reply);
     }
@@ -373,6 +378,13 @@ async function sendWhatsApp(to, message) {
   } catch (err) {
     console.error('WhatsApp send error:', err.message);
   }
+}
+
+async function notifyStaff(message) {
+  // Sends the same message individually to every number in STAFF_NUMBERS.
+  // (WhatsApp's Business API doesn't support posting into group chats, so this
+  // broadcasts to each staff member's own number instead.)
+  await Promise.all(STAFF_NUMBERS.map(num => sendWhatsApp(num, message)));
 }
 
 app.listen(3000, () => console.log('TOH Rental Bot running on port 3000'));
