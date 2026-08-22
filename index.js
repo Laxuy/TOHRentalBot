@@ -121,6 +121,52 @@ async function getTodayBookings() {
 let fleetCache = { data: null, fetchedAt: 0 };
 const FLEET_CACHE_TTL_MS = 60 * 1000; // 1 minute
 
+async function findBikeRow(plateQuery) {
+  const sheets = google.sheets({ version: 'v4', auth });
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: FLEET_SHEET_ID,
+    range: 'A2:A',
+  });
+  const rows = res.data.values || [];
+  const query = plateQuery.trim().toLowerCase();
+  for (let i = 0; i < rows.length; i++) {
+    const bikeId = (rows[i][0] || '').trim().toLowerCase();
+    // Match if the plate/number appears as the last word of the Bike ID,
+    // or the query matches the whole Bike ID (in case they type the full name).
+    const lastWord = bikeId.split(' ').pop();
+    if (lastWord === query || bikeId === query || bikeId.endsWith(' ' + query)) {
+      return { rowNumber: i + 2, bikeId: rows[i][0] }; // +2: header row + 1-indexing
+    }
+  }
+  return null;
+}
+
+async function setBikeStatus(plateQuery, status) {
+  const match = await findBikeRow(plateQuery);
+  if (!match) {
+    return { ok: false, message: `Couldn't find a bike matching "${plateQuery}" in the fleet sheet.` };
+  }
+  const sheets = google.sheets({ version: 'v4', auth });
+  const dateCol = status === 'Rented' ? 'G' : 'I'; // Rented Date or Returned Date
+  const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok' });
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: FLEET_SHEET_ID,
+    range: `J${match.rowNumber}`,
+    valueInputOption: 'USER_ENTERED',
+    resource: { values: [[status]] },
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: FLEET_SHEET_ID,
+    range: `${dateCol}${match.rowNumber}`,
+    valueInputOption: 'USER_ENTERED',
+    resource: { values: [[today]] },
+  });
+
+  fleetCache = { data: null, fetchedAt: 0 }; // force refresh next lookup
+  return { ok: true, message: `${match.bikeId} marked as ${status}.` };
+}
+
 async function getFleetAvailability(forceRefresh = false) {
   const now = Date.now();
   if (!forceRefresh && fleetCache.data && (now - fleetCache.fetchedAt) < FLEET_CACHE_TTL_MS) {
@@ -299,8 +345,20 @@ app.post('/webhook', async (req, res) => {
             await sendWhatsApp(from, `*Fleet Availability:*\n\n${formatFleetSummary(byType)}`);
             return res.sendStatus(200);
           }
+          const rentMatch = text.match(/^rent\s+(.+)$/i);
+          if (rentMatch) {
+            const result = await setBikeStatus(rentMatch[1], 'Rented');
+            await sendWhatsApp(from, result.message);
+            return res.sendStatus(200);
+          }
+          const returnMatch = text.match(/^return\s+(.+)$/i);
+          if (returnMatch) {
+            const result = await setBikeStatus(returnMatch[1], 'Available');
+            await sendWhatsApp(from, result.message);
+            return res.sendStatus(200);
+          }
           if (cmd === 'help' || cmd === 'commands') {
-            await sendWhatsApp(from, 'Staff commands:\n- fleet: full bike availability\n- list today: today\'s bookings');
+            await sendWhatsApp(from, "Staff commands:\n- fleet: full bike availability\n- list today: today's bookings\n- rent <plate>: mark a bike as rented (e.g. rent 3990)\n- return <plate>: mark a bike as available (e.g. return 3990)");
             return res.sendStatus(200);
           }
           // Any other message from a staff number is treated as internal chat,
