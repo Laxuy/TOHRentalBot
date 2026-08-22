@@ -91,6 +91,76 @@ async function appendToSheet(data) {
   }
 }
 
+async function ensureFinanceHeader() {
+  try {
+    const sheets = google.sheets({ version: 'v4', auth });
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: 'Finance!A1:F1',
+    });
+    const firstRow = res.data.values?.[0];
+    if (!firstRow || firstRow[0] !== 'Date') {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: 'Finance!A1:F1',
+        valueInputOption: 'USER_ENTERED',
+        resource: {
+          values: [['Date', 'Type', 'Bike', 'Amount (THB)', 'Description', 'Reported By']]
+        }
+      });
+    }
+  } catch (err) {
+    console.error('Finance header error:', err.message);
+  }
+}
+
+function parseThbAmount(str) {
+  if (!str) return 0;
+  const match = String(str).replace(/,/g, '').match(/[\d.]+/);
+  return match ? parseFloat(match[0]) : 0;
+}
+
+async function logFinance(type, bike, amount, description, reportedBy) {
+  try {
+    await ensureFinanceHeader();
+    const sheets = google.sheets({ version: 'v4', auth });
+    const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: 'Finance!A:F',
+      valueInputOption: 'USER_ENTERED',
+      resource: {
+        values: [[now, type, bike || '-', amount, description || '-', reportedBy || 'WhatsApp Bot']]
+      }
+    });
+    console.log(`${type} logged to Finance sheet`);
+  } catch (err) {
+    console.error('Finance log error:', err.message);
+  }
+}
+
+async function getFinanceSummary() {
+  try {
+    const sheets = google.sheets({ version: 'v4', auth });
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: 'Finance!A2:F',
+    });
+    const rows = res.data.values || [];
+    let income = 0, expense = 0;
+    rows.forEach(row => {
+      const type = (row[1] || '').trim().toLowerCase();
+      const amount = parseFloat(row[3]) || 0;
+      if (type === 'income') income += amount;
+      else if (type === 'expense') expense += amount;
+    });
+    return { income, expense, net: income - expense, count: rows.length };
+  } catch (err) {
+    console.error('Finance summary error:', err.message);
+    return null;
+  }
+}
+
 async function getTodayBookings() {
   try {
     const sheets = google.sheets({ version: 'v4', auth });
@@ -357,8 +427,25 @@ app.post('/webhook', async (req, res) => {
             await sendWhatsApp(from, result.message);
             return res.sendStatus(200);
           }
+          // expense <plate> <amount> <description...>  e.g. "expense 3990 500 broken mirror"
+          const expenseMatch = text.match(/^expense\s+(\S+)\s+(\d+(?:\.\d+)?)\s*(.*)$/i);
+          if (expenseMatch) {
+            const [, bike, amountStr, description] = expenseMatch;
+            await logFinance('Expense', bike, parseFloat(amountStr), description || 'No description', `+${from}`);
+            await sendWhatsApp(from, `Logged: ${amountStr} THB expense for ${bike}${description ? ' — ' + description : ''}`);
+            return res.sendStatus(200);
+          }
+          if (cmd === 'finance' || cmd === 'income') {
+            const summary = await getFinanceSummary();
+            if (!summary) {
+              await sendWhatsApp(from, "Couldn't load finance data right now.");
+            } else {
+              await sendWhatsApp(from, `*Finance Summary:*\n\nTotal Income: ${summary.income.toLocaleString()} THB\nTotal Expenses: ${summary.expense.toLocaleString()} THB\nNet: ${summary.net.toLocaleString()} THB\n(${summary.count} entries)`);
+            }
+            return res.sendStatus(200);
+          }
           if (cmd === 'help' || cmd === 'commands') {
-            await sendWhatsApp(from, "Staff commands:\n- fleet: full bike availability\n- list today: today's bookings\n- rent <plate>: mark a bike as rented (e.g. rent 3990)\n- return <plate>: mark a bike as available (e.g. return 3990)");
+            await sendWhatsApp(from, "Staff commands:\n- fleet: full bike availability\n- list today: today's bookings\n- rent <plate>: mark a bike as rented (e.g. rent 3990)\n- return <plate>: mark a bike as available (e.g. return 3990)\n- expense <plate> <amount> <description>: log an expense (e.g. expense 3990 500 broken mirror)\n- finance: income/expense/profit summary");
             return res.sendStatus(200);
           }
           // Any other message from a staff number is treated as internal chat,
@@ -442,6 +529,7 @@ BOOKING: Collect full name, phone number, bike type, rental start date, rental e
 - If customer says "1 week", that means 7 days. Calculate end date automatically.
 - NEVER ask for start or end date again if the customer already gave you enough info to calculate them.
 - When summarizing booking details, do NOT use markdown formatting like ** or *. Use plain text only.
+- Price must be the TOTAL cost for the full rental period (daily rate × number of days), not just the per-day rate. Show the calculation briefly if helpful, but the "Price" field itself must be the final total number in THB.
 Once you have all details say exactly: "BOOKING_COMPLETE" followed by a plain text summary with each field on its own line like:
 Full Name: ...
 Phone Number: ...
@@ -449,7 +537,7 @@ Bike Type: ...
 Start Date: ...
 End Date: ...
 Pickup Location: ...
-Price: ...
+Price: ... (total THB for the full rental, e.g. "1250 THB")
 If customer needs human help say exactly: "NEED_HUMAN_HELP".
 Be friendly, helpful and concise. Answer in the same language the customer writes in.`;
 
@@ -479,6 +567,10 @@ Be friendly, helpful and concise. Answer in the same language the customer write
         price: cleanReply.match(/Price[:\s]+([^\n]+)/i)?.[1],
       };
       await appendToSheet(bookingData);
+      const totalAmount = parseThbAmount(bookingData.price);
+      if (totalAmount > 0) {
+        await logFinance('Income', bookingData.bike, totalAmount, `Booking - ${bookingData.name || 'customer'}`, 'WhatsApp Bot');
+      }
       console.log(`Booking completed for ${from}`);
     } else if (reply.includes('NEED_HUMAN_HELP')) {
       await sendWhatsApp(from, 'No problem! Our staff will contact you shortly.');
