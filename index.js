@@ -285,15 +285,27 @@ app.post('/webhook', async (req, res) => {
         const text = message.text.body.trim();
         console.log(`Message from ${from}: ${text}`);
 
-        if (text.toLowerCase() === 'list today' && STAFF_NUMBERS.includes(from)) {
-          const list = await getTodayBookings();
-          await sendWhatsApp(from, list);
-          return res.sendStatus(200);
-        }
+        const isStaff = STAFF_NUMBERS.includes(from);
 
-        if (text.toLowerCase() === 'fleet' && STAFF_NUMBERS.includes(from)) {
-          const byType = await getFleetAvailability(true);
-          await sendWhatsApp(from, `*Fleet Availability:*\n\n${formatFleetSummary(byType)}`);
+        if (isStaff) {
+          const cmd = text.toLowerCase();
+          if (cmd === 'list today') {
+            const list = await getTodayBookings();
+            await sendWhatsApp(from, list);
+            return res.sendStatus(200);
+          }
+          if (cmd === 'fleet') {
+            const byType = await getFleetAvailability(true);
+            await sendWhatsApp(from, `*Fleet Availability:*\n\n${formatFleetSummary(byType)}`);
+            return res.sendStatus(200);
+          }
+          if (cmd === 'help' || cmd === 'commands') {
+            await sendWhatsApp(from, 'Staff commands:\n- fleet: full bike availability\n- list today: today\'s bookings');
+            return res.sendStatus(200);
+          }
+          // Any other message from a staff number is treated as internal chat,
+          // not a customer booking request — don't send it to the customer AI.
+          await sendWhatsApp(from, "Didn't recognize that as a command. Text 'help' to see what I can do.");
           return res.sendStatus(200);
         }
 
