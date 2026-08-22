@@ -214,39 +214,17 @@ async function getNearestBikes(custLat, custLon) {
   return msg;
 }
 
-async function downloadWhatsAppMedia(mediaId) {
-  // Step 1: get the temporary media URL from WhatsApp
-  const metaRes = await axios.get(
-    `https://graph.facebook.com/v19.0/${mediaId}`,
-    { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-  );
-  const mediaUrl = metaRes.data.url;
-  const mimeType = metaRes.data.mime_type || 'image/jpeg';
-
-  // Step 2: download the actual bytes
-  const fileRes = await axios.get(mediaUrl, {
-    headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
-    responseType: 'arraybuffer',
+async function logPhotoReceived(from, mediaId, mimeType) {
+  const sheets = google.sheets({ version: 'v4', auth });
+  const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SHEET_ID,
+    range: 'Photos!A:D',
+    valueInputOption: 'USER_ENTERED',
+    resource: {
+      values: [[now, `+${from}`, mediaId, mimeType]]
+    }
   });
-  return { buffer: Buffer.from(fileRes.data), mimeType };
-}
-
-async function saveToDrive(buffer, mimeType, filename) {
-  const drive = google.drive({ version: 'v3', auth });
-  const { Readable } = require('stream');
-  const stream = Readable.from(buffer);
-  const res = await drive.files.create({
-    requestBody: {
-      name: filename,
-      parents: [CONTRACTS_FOLDER_ID],
-    },
-    media: {
-      mimeType,
-      body: stream,
-    },
-    fields: 'id, webViewLink',
-  });
-  return res.data;
 }
 
 async function forwardImageToStaff(mediaId, caption) {
@@ -266,17 +244,22 @@ async function forwardImageToStaff(mediaId, caption) {
 
 async function handleIncomingPhoto(from, mediaId) {
   try {
-    const { buffer, mimeType } = await downloadWhatsAppMedia(mediaId);
-    const ext = mimeType.includes('png') ? 'png' : 'jpg';
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const filename = `${from}_${timestamp}.${ext}`;
+    // Get mime type (needed for the log) without keeping the file bytes around —
+    // Drive storage isn't available on this Google account (personal Gmail service
+    // account storage-quota limitation), so photos are forwarded live to staff
+    // instead of archived. WhatsApp keeps the media accessible via mediaId for ~30 days.
+    const metaRes = await axios.get(
+      `https://graph.facebook.com/v19.0/${mediaId}`,
+      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+    );
+    const mimeType = metaRes.data.mime_type || 'image/jpeg';
 
-    await saveToDrive(buffer, mimeType, filename);
     await forwardImageToStaff(mediaId, `📄 Photo from +${from}`);
-    await sendWhatsApp(from, 'Got it, saved ✅');
+    await logPhotoReceived(from, mediaId, mimeType);
+    await sendWhatsApp(from, 'Got it, sent to our team ✅');
   } catch (err) {
     console.error('Photo handling error:', err.message);
-    await sendWhatsApp(from, "Sorry, I couldn't save that photo — please try sending it again.");
+    await sendWhatsApp(from, "Sorry, I couldn't process that photo — please try sending it again.");
   }
 }
 
