@@ -473,6 +473,7 @@ app.post('/webhook', async (req, res) => {
 });
 
 async function handleMessage(from, text) {
+  const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
   if (!conversations[from]) {
     conversations[from] = { history: [], bookingData: {}, stage: 'chat' };
   }
