@@ -1,5 +1,6 @@
 const express = require('express');
 const axios = require('axios');
+const { google } = require('googleapis');
 const { extractContractData, shouldAutoFill } = require('./contractExtractor');
 require('dotenv').config();
 const app = express();
@@ -237,6 +238,44 @@ async function setBikeStatus(plateQuery, status) {
   return { ok: true, message: `${match.bikeId} marked as ${status}.` };
 }
 
+/**
+ * Writes extracted contract data (Renter Name, Renter Phone, Rented Date,
+ * Expected Return, Status) into the matching Fleet Tracker row.
+ * Fleet Tracker columns: A Bike ID, B Model, C Color, D Location,
+ * E Renter Name, F Renter Phone, G Rented Date, H Expected Return,
+ * I Returned Date, J Status, K Notes.
+ */
+async function autoFillContractToFleet(extracted) {
+  const match = await findBikeRow(extracted.plate);
+  if (!match) {
+    return { ok: false, message: `Auto-fill skipped: no fleet row found for plate "${extracted.plate}".` };
+  }
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: FLEET_SHEET_ID,
+    range: `E${match.rowNumber}:H${match.rowNumber}`,
+    valueInputOption: 'USER_ENTERED',
+    resource: {
+      values: [[
+        extracted.renterName || '',
+        extracted.renterPhone || '',
+        extracted.rentedDate || '',
+        extracted.expectedReturn || '',
+      ]]
+    },
+  });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: FLEET_SHEET_ID,
+    range: `J${match.rowNumber}`,
+    valueInputOption: 'USER_ENTERED',
+    resource: { values: [['Rented']] },
+  });
+
+  fleetCache = { data: null, fetchedAt: 0 }; // force refresh next lookup
+  return { ok: true, message: `${match.bikeId} auto-filled from contract (${extracted.renterName}).` };
+}
+
 async function getFleetAvailability(forceRefresh = false) {
   const now = Date.now();
   if (!forceRefresh && fleetCache.data && (now - fleetCache.fetchedAt) < FLEET_CACHE_TTL_MS) {
@@ -360,18 +399,39 @@ async function forwardImageToStaff(mediaId, caption) {
 
 async function handleIncomingPhoto(from, mediaId) {
   try {
-    // Get mime type (needed for the log) without keeping the file bytes around —
-    // Drive storage isn't available on this Google account (personal Gmail service
-    // account storage-quota limitation), so photos are forwarded live to staff
-    // instead of archived. WhatsApp keeps the media accessible via mediaId for ~30 days.
+    // Get mime type + media URL. mediaUrl is needed to feed the image to Gemini
+    // for contract extraction; it requires the same Bearer auth header to fetch.
     const metaRes = await axios.get(
       `https://graph.facebook.com/v19.0/${mediaId}`,
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
     );
     const mimeType = metaRes.data.mime_type || 'image/jpeg';
+    const mediaUrl = metaRes.data.url;
 
+    // Always forward to staff and log the photo first — this preserves the
+    // existing behavior even if extraction below fails for any reason.
     await forwardImageToStaff(mediaId, `📄 Photo from +${from}`);
     await logPhotoReceived(from, mediaId, mimeType);
+
+    // Attempt contract auto-extraction (best effort — never blocks the customer reply)
+    let autoFillNote = '';
+    try {
+      const extracted = await extractContractData(mediaUrl, `Bearer ${WHATSAPP_TOKEN}`);
+      if (shouldAutoFill(extracted)) {
+        const result = await autoFillContractToFleet(extracted);
+        if (result.ok) {
+          await notifyStaff(`✅ Auto-filled fleet sheet from contract photo (+${from}):\n${result.message}`);
+        } else {
+          await notifyStaff(`⚠️ Contract read OK but couldn't auto-fill (+${from}):\n${result.message}\nPlease enter manually.`);
+        }
+      } else {
+        await notifyStaff(`⚠️ Contract photo from +${from} needs manual entry (low confidence or missing plate/name). Please check the photo above and use "rent <plate>".`);
+      }
+    } catch (extractErr) {
+      console.error('Contract extraction error:', extractErr.message);
+      await notifyStaff(`⚠️ Couldn't auto-read contract photo from +${from} — please enter manually.`);
+    }
+
     await sendWhatsApp(from, 'Got it, sent to our team ✅');
   } catch (err) {
     console.error('Photo handling error:', err.message);
