@@ -1,6 +1,6 @@
 const express = require('express');
 const axios = require('axios');
-const { google } = require('googleapis');
+const { extractContractData, shouldAutoFill } = require('./contractExtractor');
 require('dotenv').config();
 const app = express();
 app.use(express.json());
