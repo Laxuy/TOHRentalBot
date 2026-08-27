@@ -20,6 +20,9 @@ const SHEET_ID = process.env.SHEET_ID;
 const FLEET_SHEET_ID = process.env.FLEET_SHEET_ID || '1XvSdL_oQvEZccji43kg-2C7BQgZLXi3Don2y-lZicuY';
 const CONTRACTS_FOLDER_ID = process.env.CONTRACTS_FOLDER_ID || '1r3YhaWFQl7hk2Y5WJY6rdPt3cLlLGIQ_';
 const MY_NUMBER = process.env.MY_NUMBER;
+// Optional: set DASHBOARD_TOKEN in Railway env vars to require ?token=... on /dashboard.
+// Leave unset during testing; set it before sharing the URL anywhere.
+const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || '';
 
 const conversations = {};
 const processedMessages = new Set();
@@ -678,5 +681,130 @@ async function notifyStaff(message) {
   // broadcasts to each staff member's own number instead.)
   await Promise.all(STAFF_NUMBERS.map(num => sendWhatsApp(num, message)));
 }
+
+async function getRecentBookings(limit = 10) {
+  const sheets = google.sheets({ version: 'v4', auth });
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: 'Sheet1!A2:I',
+  });
+  const rows = res.data.values || [];
+  return rows.slice(-limit).reverse().map(row => ({
+    date: row[0] || '',
+    name: row[1] || '',
+    phone: row[2] || '',
+    bike: row[3] || '',
+    startDate: row[4] || '',
+    endDate: row[5] || '',
+    location: row[6] || '',
+    price: row[7] || '',
+    source: row[8] || '',
+  }));
+}
+
+async function getRecentPhotos(limit = 10) {
+  const sheets = google.sheets({ version: 'v4', auth });
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: 'Photos!A2:D',
+  });
+  const rows = res.data.values || [];
+  return rows.slice(-limit).reverse().map(row => ({
+    date: row[0] || '',
+    from: row[1] || '',
+    mediaId: row[2] || '',
+    mimeType: row[3] || '',
+  }));
+}
+
+app.get('/api/dashboard-data', async (req, res) => {
+  try {
+    if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const [bookings, photos, fleet, finance] = await Promise.all([
+      getRecentBookings(10).catch(() => []),
+      getRecentPhotos(10).catch(() => []),
+      getFleetAvailability(true).catch(() => ({})),
+      getFinanceSummary().catch(() => null),
+    ]);
+    res.json({ bookings, photos, fleet, finance, updatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error('Dashboard data error:', err.message);
+    res.status(500).json({ error: 'Failed to load dashboard data' });
+  }
+});
+
+app.get('/dashboard', (req, res) => {
+  if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+    return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  }
+  const token = req.query.token || '';
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>TOH RentalBot Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: -apple-system, sans-serif; background:#0f0f10; color:#eee; margin:0; padding:20px; }
+  h1 { font-size:20px; margin-bottom:4px; }
+  .updated { color:#888; font-size:12px; margin-bottom:20px; }
+  .grid { display:grid; grid-template-columns: 1fr 1fr; gap:20px; }
+  @media (max-width:800px) { .grid { grid-template-columns: 1fr; } }
+  .card { background:#1a1a1c; border-radius:10px; padding:16px; }
+  .card h2 { font-size:15px; margin:0 0 10px; color:#ccc; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 4px; border-bottom:1px solid #2a2a2c; }
+  th { color:#888; font-weight:500; }
+  .stat { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid #2a2a2c; font-size:14px; }
+  .stat:last-child { border-bottom:none; }
+  .empty { color:#666; font-size:13px; padding:8px 0; }
+</style>
+</head>
+<body>
+  <h1>TOH RentalBot Dashboard</h1>
+  <div class="updated" id="updated">Loading...</div>
+  <div class="grid">
+    <div class="card"><h2>Recent bookings</h2><div id="bookings">Loading...</div></div>
+    <div class="card"><h2>Recent contract photos</h2><div id="photos">Loading...</div></div>
+    <div class="card"><h2>Fleet availability</h2><div id="fleet">Loading...</div></div>
+    <div class="card"><h2>Finance summary</h2><div id="finance">Loading...</div></div>
+  </div>
+<script>
+  const TOKEN = ${JSON.stringify(token)};
+  async function load() {
+    try {
+      const res = await fetch('/api/dashboard-data' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
+      const data = await res.json();
+      if (data.error) { document.getElementById('updated').textContent = data.error; return; }
+      document.getElementById('updated').textContent = 'Updated ' + new Date(data.updatedAt).toLocaleTimeString();
+
+      document.getElementById('bookings').innerHTML = data.bookings.length ? '<table><tr><th>Name</th><th>Bike</th><th>Dates</th><th>Price</th></tr>' +
+        data.bookings.map(b => \`<tr><td>\${b.name}</td><td>\${b.bike}</td><td>\${b.startDate} - \${b.endDate}</td><td>\${b.price}</td></tr>\`).join('') + '</table>'
+        : '<div class="empty">No bookings yet</div>';
+
+      document.getElementById('photos').innerHTML = data.photos.length ? '<table><tr><th>From</th><th>Time</th></tr>' +
+        data.photos.map(p => \`<tr><td>+\${p.from}</td><td>\${p.date}</td></tr>\`).join('') + '</table>'
+        : '<div class="empty">No photos yet</div>';
+
+      const fleetRows = Object.entries(data.fleet).map(([type, v]) => \`<div class="stat"><span>\${type}</span><span>\${v.available}/\${v.total}</span></div>\`).join('');
+      document.getElementById('fleet').innerHTML = fleetRows || '<div class="empty">No fleet data</div>';
+
+      document.getElementById('finance').innerHTML = data.finance ?
+        \`<div class="stat"><span>Income</span><span>\${data.finance.income.toLocaleString()} THB</span></div>
+         <div class="stat"><span>Expenses</span><span>\${data.finance.expense.toLocaleString()} THB</span></div>
+         <div class="stat"><span>Net</span><span>\${data.finance.net.toLocaleString()} THB</span></div>\`
+        : '<div class="empty">No finance data</div>';
+    } catch (err) {
+      document.getElementById('updated').textContent = 'Error loading data';
+    }
+  }
+  load();
+  setInterval(load, 5000);
+</script>
+</body>
+</html>`);
+});
 
 app.listen(3000, () => console.log('TOH Rental Bot running on port 3000'));
