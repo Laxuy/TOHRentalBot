@@ -408,10 +408,18 @@ async function handleIncomingPhoto(from, mediaId) {
     const mimeType = metaRes.data.mime_type || 'image/jpeg';
     const mediaUrl = metaRes.data.url;
 
-    // Always forward to staff and log the photo first — this preserves the
-    // existing behavior even if extraction below fails for any reason.
-    await forwardImageToStaff(mediaId, `📄 Photo from +${from}`);
-    await logPhotoReceived(from, mediaId, mimeType);
+    // Forward to staff and log the photo — each wrapped separately so a
+    // failure in one (e.g. missing sheet tab) never blocks the rest.
+    try {
+      await forwardImageToStaff(mediaId, `📄 Photo from +${from}`);
+    } catch (fwdErr) {
+      console.error('Forward step failed:', fwdErr.message);
+    }
+    try {
+      await logPhotoReceived(from, mediaId, mimeType);
+    } catch (logErr) {
+      console.error('Log photo step failed:', logErr.message);
+    }
 
     // Attempt contract auto-extraction (best effort — never blocks the customer reply)
     let autoFillNote = '';
