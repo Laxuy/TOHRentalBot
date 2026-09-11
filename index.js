@@ -709,10 +709,10 @@ async function notifyStaff(message) {
   await Promise.all(STAFF_NUMBERS.map(num => sendWhatsApp(num, message)));
 }
 
-async function getRecentBookings(limit = 10) {
+async function getRecentBookings(limit = 10, sheetId = SHEET_ID) {
   const sheets = google.sheets({ version: 'v4', auth });
   const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
+    spreadsheetId: sheetId,
     range: 'Sheet1!A2:I',
   });
   const rows = res.data.values || [];
@@ -800,6 +800,23 @@ app.post('/api/:shopId/motorbikes/:bikeId/status', async (req, res) => {
     console.error('Update bike status error:', err.message);
     const httpStatus = err.message.startsWith('Unknown shop') ? 404 : 500;
     res.status(httpStatus).json({ error: err.message });
+  }
+});
+
+// Returns recent bookings for a shop's bookings sheet, used by the Rentals
+// screen. Reuses getRecentBookings (same data the /dashboard uses for TOH).
+app.get('/api/:shopId/rentals', async (req, res) => {
+  try {
+    if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const shop = getShop(req.params.shopId);
+    const bookings = await getRecentBookings(50, shop.sheetId);
+    res.json({ shop: shop.name, bookings, updatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error('Rentals API error:', err.message);
+    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
+    res.status(status).json({ error: err.message });
   }
 });
 
@@ -935,6 +952,10 @@ app.get('/motorbikes', (req, res) => {
 <a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
 <span class="material-symbols-outlined">two_wheeler</span>
 <span class="font-label-caps text-label-caps">Motorbikes</span>
+</a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rentals?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">receipt_long</span>
+<span class="font-label-caps text-label-caps">Rentals</span>
 </a>
 </nav>
 </aside>
@@ -1072,6 +1093,151 @@ app.get('/motorbikes', (req, res) => {
     }
   }
   loadBikes();
+</script>
+</body></html>`);
+});
+
+app.get('/rentals', (req, res) => {
+  if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+    return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  }
+  const token = req.query.token || '';
+  res.send(`<!DOCTYPE html><html class="light" lang="en"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>Rentals - TOH Rental</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com" rel="preconnect">
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
+<script id="tailwind-config">
+  tailwind.config = {
+    darkMode: "class",
+    theme: { extend: {
+      "colors": {
+        "outline-variant": "#c1c6d7", "background": "#faf8ff", "surface-container": "#eaedff",
+        "primary-container": "#0070eb", "surface-bright": "#faf8ff", "on-surface-variant": "#414755",
+        "surface-container-low": "#f2f3ff", "on-background": "#131b2e", "surface-container-lowest": "#ffffff",
+        "outline": "#717786", "secondary-container": "#d5e3fd", "on-surface": "#131b2e",
+        "surface": "#faf8ff", "surface-tint": "#005bc1", "secondary": "#515f74",
+        "surface-container-high": "#e2e7ff", "surface-container-highest": "#dae2fd",
+        "primary": "#0058bc", "on-primary": "#ffffff", "on-primary-container": "#fefcff",
+        "on-secondary-container": "#57657b", "error": "#ba1a1a"
+      },
+      "borderRadius": { "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem" },
+      "spacing": { "gutter": "16px", "md": "16px", "xs": "8px", "base": "4px", "margin-mobile": "16px", "margin-desktop": "32px", "sm": "12px", "xl": "32px", "lg": "24px" },
+      "fontFamily": { "status-badge": ["Inter"], "headline-md": ["Inter"], "body-md": ["Inter"], "body-lg": ["Inter"], "label-caps": ["JetBrains Mono"], "headline-lg": ["Inter"] },
+      "fontSize": {
+        "status-badge": ["12px", { "lineHeight": "12px", "fontWeight": "700" }],
+        "headline-md": ["20px", { "lineHeight": "28px", "fontWeight": "600" }],
+        "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
+        "label-caps": ["12px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600" }],
+        "headline-lg": ["24px", { "lineHeight": "32px", "fontWeight": "600" }]
+      }
+    } }
+  }
+</script>
+<style>
+  .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  body { min-height: max(884px, 100dvh); }
+</style>
+</head>
+<body class="bg-surface text-on-surface font-body-md min-h-screen flex flex-col md:flex-row">
+<header class="flex justify-between items-center w-full px-margin-mobile h-16 z-50 bg-surface border-b border-outline-variant md:hidden sticky top-0">
+<h1 class="font-headline-lg text-headline-lg font-bold text-primary tracking-tight">TOH Rental</h1>
+</header>
+<aside class="hidden md:flex flex-col h-full py-lg gap-xs bg-surface border-r border-outline-variant fixed left-0 top-0 w-[280px] z-40 overflow-y-auto no-scrollbar">
+<div class="px-4 mb-6">
+<h1 class="font-headline-md text-headline-md text-primary mb-6">TOH Rental</h1>
+</div>
+<nav class="flex flex-col gap-2">
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/motorbikes?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">two_wheeler</span>
+<span class="font-label-caps text-label-caps">Motorbikes</span>
+</a>
+<a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
+<span class="material-symbols-outlined">receipt_long</span>
+<span class="font-label-caps text-label-caps">Rentals</span>
+</a>
+</nav>
+</aside>
+<main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
+<header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0">
+<h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Rentals</h2>
+</header>
+<div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6">
+<div class="relative">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline">search</span>
+<input id="search-input" class="w-full pl-10 pr-4 py-3 bg-surface-container-lowest border border-outline-variant rounded-xl focus:outline-none focus:ring-2 focus:ring-primary font-body-md text-body-md" placeholder="Search by customer, phone, or bike..." type="text">
+</div>
+<div id="rentals-list" class="flex flex-col gap-3">
+<div class="text-on-surface-variant">Loading rentals...</div>
+</div>
+</div>
+</main>
+<script>
+  const TOKEN = ${JSON.stringify(token)};
+  let ALL_BOOKINGS = [];
+
+  function rentalCard(b) {
+    return \`<article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6">
+      <div class="w-10 h-10 rounded bg-surface-container flex items-center justify-center shrink-0 text-on-surface-variant">
+        <span class="material-symbols-outlined text-[20px]">two_wheeler</span>
+      </div>
+      <div class="flex-1 grid grid-cols-1 sm:grid-cols-4 gap-2 sm:gap-4">
+        <div>
+          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Customer</p>
+          <p class="font-body-md text-on-surface font-semibold">\${b.name || '-'}</p>
+          <p class="font-body-md text-on-surface-variant text-sm">\${b.phone || '-'}</p>
+        </div>
+        <div>
+          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Bike</p>
+          <p class="font-body-md text-on-surface">\${b.bike || '-'}</p>
+        </div>
+        <div>
+          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Dates</p>
+          <p class="font-body-md text-on-surface">\${b.startDate || '-'} → \${b.endDate || '-'}</p>
+          <p class="font-body-md text-on-surface-variant text-sm">\${b.location || '-'}</p>
+        </div>
+        <div>
+          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Price</p>
+          <p class="font-body-md text-on-surface font-semibold">\${b.price || '-'}</p>
+          <p class="font-body-md text-on-surface-variant text-sm">\${b.date || ''}</p>
+        </div>
+      </div>
+    </article>\`;
+  }
+
+  function renderRentals() {
+    const list = document.getElementById('rentals-list');
+    const query = document.getElementById('search-input').value.trim().toLowerCase();
+    let filtered = ALL_BOOKINGS;
+    if (query) {
+      filtered = ALL_BOOKINGS.filter(b => \`\${b.name} \${b.phone} \${b.bike}\`.toLowerCase().includes(query));
+    }
+    list.innerHTML = filtered.length ? filtered.map(rentalCard).join('') : '<div class="text-on-surface-variant">No rentals match.</div>';
+  }
+
+  document.getElementById('search-input').addEventListener('input', renderRentals);
+
+  async function loadRentals() {
+    try {
+      const res = await fetch('/api/toh/rentals' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
+      const data = await res.json();
+      if (data.error) {
+        document.getElementById('rentals-list').innerHTML = '<div class="text-error">' + data.error + '</div>';
+        return;
+      }
+      ALL_BOOKINGS = data.bookings;
+      renderRentals();
+    } catch (err) {
+      document.getElementById('rentals-list').innerHTML = '<div class="text-error">Failed to load rentals</div>';
+    }
+  }
+  loadRentals();
 </script>
 </body></html>`);
 });
