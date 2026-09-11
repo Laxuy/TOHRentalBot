@@ -1,11 +1,9 @@
 const shops = {
   toh: {
     name: "TOH Motorbike Rental",
-    sheetId: process.env.SHEET_ID,           // bookings sheet
-    fleetSheetId: process.env.FLEET_SHEET_ID, // fleet tracker sheet
+    sheetId: process.env.SHEET_ID,
+    fleetSheetId: process.env.FLEET_SHEET_ID || '1XvSdL_oQvEZccji43kg-2C7BQgZLXi3Don2y-lZicuY',
   },
-  // future shops get added here, e.g.:
-  // "shop2": { name: "...", sheetId: "...", fleetSheetId: "..." }
 };
 
 function getShop(shopId) {
