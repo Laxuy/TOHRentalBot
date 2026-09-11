@@ -1,11 +1,11 @@
-// config/shops.js
 const shops = {
   toh: {
     name: "TOH Motorbike Rental",
-    sheetId: process.env.SHEET_ID, // existing TOH sheet, unchanged
+    sheetId: process.env.SHEET_ID,           // bookings sheet
+    fleetSheetId: process.env.FLEET_SHEET_ID, // fleet tracker sheet
   },
   // future shops get added here, e.g.:
-  // "shop2": { name: "...", sheetId: "..." }
+  // "shop2": { name: "...", sheetId: "...", fleetSheetId: "..." }
 };
 
 function getShop(shopId) {
