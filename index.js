@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const { google } = require('googleapis');
 const { extractContractData, shouldAutoFill } = require('./contractExtractor');
+const { getShop } = require('./config/shops');
 require('dotenv').config();
 const app = express();
 app.use(express.json());
@@ -311,6 +312,32 @@ async function getFleetAvailability(forceRefresh = false) {
     console.error('Fleet sheet error:', err.message);
     return fleetCache.data || {};
   }
+}
+
+// Returns every individual bike row from a fleet sheet (used by the
+// multi-shop /api/:shopId/motorbikes endpoint below).
+async function getFleetList(fleetSheetId) {
+  const sheets = google.sheets({ version: 'v4', auth });
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: fleetSheetId,
+    range: 'A2:K',
+  });
+  const rows = res.data.values || [];
+  return rows
+    .filter(row => row[0]) // has a Bike ID
+    .map(row => ({
+      bikeId: row[0] || '',
+      model: row[1] || '',
+      color: row[2] || '',
+      location: row[3] || '',
+      renterName: row[4] || '',
+      renterPhone: row[5] || '',
+      rentedDate: row[6] || '',
+      expectedReturn: row[7] || '',
+      returnedDate: row[8] || '',
+      status: row[9] || 'Available',
+      notes: row[10] || '',
+    }));
 }
 
 function formatFleetSummary(byType) {
@@ -732,6 +759,24 @@ app.get('/api/dashboard-data', async (req, res) => {
   } catch (err) {
     console.error('Dashboard data error:', err.message);
     res.status(500).json({ error: 'Failed to load dashboard data' });
+  }
+});
+
+// Multi-shop endpoint: returns the full individual-bike list for one shop's
+// fleet sheet, looked up via config/shops.js. TOH is the "toh" shop for now;
+// future shops get added to that config file with their own fleetSheetId.
+app.get('/api/:shopId/motorbikes', async (req, res) => {
+  try {
+    if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const shop = getShop(req.params.shopId);
+    const bikes = await getFleetList(shop.fleetSheetId);
+    res.json({ shop: shop.name, bikes, updatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error('Motorbikes API error:', err.message);
+    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
+    res.status(status).json({ error: err.message });
   }
 });
 
