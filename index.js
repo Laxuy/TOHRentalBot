@@ -196,10 +196,10 @@ async function getTodayBookings() {
 let fleetCache = { data: null, fetchedAt: 0 };
 const FLEET_CACHE_TTL_MS = 60 * 1000; // 1 minute
 
-async function findBikeRow(plateQuery) {
+async function findBikeRow(plateQuery, fleetSheetId = FLEET_SHEET_ID) {
   const sheets = google.sheets({ version: 'v4', auth });
   const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: FLEET_SHEET_ID,
+    spreadsheetId: fleetSheetId,
     range: 'A2:A',
   });
   const rows = res.data.values || [];
@@ -216,8 +216,8 @@ async function findBikeRow(plateQuery) {
   return null;
 }
 
-async function setBikeStatus(plateQuery, status) {
-  const match = await findBikeRow(plateQuery);
+async function setBikeStatus(plateQuery, status, fleetSheetId = FLEET_SHEET_ID) {
+  const match = await findBikeRow(plateQuery, fleetSheetId);
   if (!match) {
     return { ok: false, message: `Couldn't find a bike matching "${plateQuery}" in the fleet sheet.` };
   }
@@ -226,13 +226,13 @@ async function setBikeStatus(plateQuery, status) {
   const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok' });
 
   await sheets.spreadsheets.values.update({
-    spreadsheetId: FLEET_SHEET_ID,
+    spreadsheetId: fleetSheetId,
     range: `J${match.rowNumber}`,
     valueInputOption: 'USER_ENTERED',
     resource: { values: [[status]] },
   });
   await sheets.spreadsheets.values.update({
-    spreadsheetId: FLEET_SHEET_ID,
+    spreadsheetId: fleetSheetId,
     range: `${dateCol}${match.rowNumber}`,
     valueInputOption: 'USER_ENTERED',
     resource: { values: [[today]] },
@@ -780,6 +780,29 @@ app.get('/api/:shopId/motorbikes', async (req, res) => {
   }
 });
 
+// Updates one bike's status from the Motorbikes screen (Rent/Return buttons).
+// Reuses the same setBikeStatus logic the WhatsApp "rent"/"return" staff
+// commands use, scoped to the given shop's fleet sheet.
+app.post('/api/:shopId/motorbikes/:bikeId/status', async (req, res) => {
+  try {
+    if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const shop = getShop(req.params.shopId);
+    const { status } = req.body || {};
+    if (!['Rented', 'Available'].includes(status)) {
+      return res.status(400).json({ error: 'status must be "Rented" or "Available"' });
+    }
+    const result = await setBikeStatus(req.params.bikeId, status, shop.fleetSheetId);
+    if (!result.ok) return res.status(404).json(result);
+    res.json(result);
+  } catch (err) {
+    console.error('Update bike status error:', err.message);
+    const httpStatus = err.message.startsWith('Unknown shop') ? 404 : 500;
+    res.status(httpStatus).json({ error: err.message });
+  }
+});
+
 app.get('/dashboard', (req, res) => {
   if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
     return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
@@ -950,12 +973,16 @@ app.get('/motorbikes', (req, res) => {
 
   function bikeCard(b) {
     const badge = badgeClasses(b.status);
-    const extra = (b.status || '').toLowerCase() === 'rented'
+    const isRented = (b.status || '').toLowerCase() === 'rented';
+    const extra = isRented
       ? \`<div class="mt-3 bg-surface-container-low p-2 rounded border border-outline-variant/50">
            <p class="font-body-md text-body-md"><span class="font-semibold">Renter:</span> \${b.renterName || '-'}</p>
            <p class="font-body-md text-body-md text-on-surface-variant mt-1">Expected return: \${b.expectedReturn || '-'}</p>
          </div>\`
       : '';
+    const actionLabel = isRented ? 'Mark Returned' : 'Mark Rented';
+    const newStatus = isRented ? 'Available' : 'Rented';
+    const bikeIdAttr = b.bikeId.replace(/"/g, '&quot;');
     return \`<article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col gap-3 hover:shadow-md transition-shadow">
       <div class="flex justify-between items-start">
         <div>
@@ -965,6 +992,9 @@ app.get('/motorbikes', (req, res) => {
         <div class="px-3 py-1 rounded-full font-status-badge text-status-badge uppercase border \${badge}">\${b.status || 'Available'}</div>
       </div>
       \${extra}
+      <div class="mt-1">
+        <button class="update-status-btn px-4 py-2 bg-primary text-on-primary rounded-lg font-label-caps text-label-caps hover:bg-surface-tint transition-colors" data-bike-id="\${bikeIdAttr}" data-new-status="\${newStatus}">\${actionLabel}</button>
+      </div>
     </article>\`;
   }
 
@@ -999,6 +1029,33 @@ app.get('/motorbikes', (req, res) => {
     });
   });
   document.getElementById('search-input').addEventListener('input', renderBikes);
+
+  document.getElementById('bike-grid').addEventListener('click', async (e) => {
+    const btn = e.target.closest('.update-status-btn');
+    if (!btn) return;
+    const originalLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Updating...';
+    try {
+      const res = await fetch('/api/toh/motorbikes/' + encodeURIComponent(btn.dataset.bikeId) + '/status' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: btn.dataset.newStatus })
+      });
+      const data = await res.json();
+      if (data.error) {
+        alert(data.error);
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+        return;
+      }
+      await loadBikes();
+    } catch (err) {
+      alert('Failed to update status');
+      btn.disabled = false;
+      btn.textContent = originalLabel;
+    }
+  });
 
   async function loadBikes() {
     try {
