@@ -852,4 +852,171 @@ app.get('/dashboard', (req, res) => {
 </html>`);
 });
 
+app.get('/motorbikes', (req, res) => {
+  if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+    return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  }
+  const token = req.query.token || '';
+  res.send(`<!DOCTYPE html><html class="light" lang="en"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>Motorbikes Inventory - TOH Rental</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com" rel="preconnect">
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
+<script id="tailwind-config">
+  tailwind.config = {
+    darkMode: "class",
+    theme: { extend: {
+      "colors": {
+        "outline-variant": "#c1c6d7", "background": "#faf8ff", "surface-container": "#eaedff",
+        "primary-container": "#0070eb", "surface-bright": "#faf8ff", "on-surface-variant": "#414755",
+        "surface-container-low": "#f2f3ff", "on-background": "#131b2e", "surface-container-lowest": "#ffffff",
+        "outline": "#717786", "secondary-container": "#d5e3fd", "on-surface": "#131b2e",
+        "surface": "#faf8ff", "surface-tint": "#005bc1", "secondary": "#515f74",
+        "surface-container-high": "#e2e7ff", "surface-container-highest": "#dae2fd",
+        "primary": "#0058bc", "on-primary": "#ffffff", "on-primary-container": "#fefcff",
+        "on-secondary-container": "#57657b", "error": "#ba1a1a"
+      },
+      "borderRadius": { "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem" },
+      "spacing": { "gutter": "16px", "md": "16px", "xs": "8px", "base": "4px", "margin-mobile": "16px", "margin-desktop": "32px", "sm": "12px", "xl": "32px", "lg": "24px" },
+      "fontFamily": { "status-badge": ["Inter"], "headline-md": ["Inter"], "body-md": ["Inter"], "body-lg": ["Inter"], "label-caps": ["JetBrains Mono"], "headline-lg": ["Inter"] },
+      "fontSize": {
+        "status-badge": ["12px", { "lineHeight": "12px", "fontWeight": "700" }],
+        "headline-md": ["20px", { "lineHeight": "28px", "fontWeight": "600" }],
+        "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
+        "label-caps": ["12px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600" }],
+        "headline-lg": ["24px", { "lineHeight": "32px", "fontWeight": "600" }]
+      }
+    } }
+  }
+</script>
+<style>
+  .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  body { min-height: max(884px, 100dvh); }
+</style>
+</head>
+<body class="bg-surface text-on-surface font-body-md min-h-screen flex flex-col md:flex-row">
+<header class="flex justify-between items-center w-full px-margin-mobile h-16 z-50 bg-surface border-b border-outline-variant md:hidden sticky top-0">
+<h1 class="font-headline-lg text-headline-lg font-bold text-primary tracking-tight">TOH Rental</h1>
+</header>
+<aside class="hidden md:flex flex-col h-full py-lg gap-xs bg-surface border-r border-outline-variant fixed left-0 top-0 w-[280px] z-40 overflow-y-auto no-scrollbar">
+<div class="px-4 mb-6">
+<h1 class="font-headline-md text-headline-md text-primary mb-6">TOH Rental</h1>
+</div>
+<nav class="flex flex-col gap-2">
+<a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
+<span class="material-symbols-outlined">two_wheeler</span>
+<span class="font-label-caps text-label-caps">Motorbikes</span>
+</a>
+</nav>
+</aside>
+<main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
+<header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0">
+<h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Motorbike Inventory</h2>
+</header>
+<div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6">
+<div class="flex flex-col md:flex-row gap-4 mb-6">
+<div class="relative flex-1">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline">search</span>
+<input id="search-input" class="w-full pl-10 pr-4 py-3 bg-surface-container-lowest border border-outline-variant rounded-xl focus:outline-none focus:ring-2 focus:ring-primary font-body-md text-body-md" placeholder="Search by model, plate, or status..." type="text">
+</div>
+<div id="filter-bar" class="flex gap-2 overflow-x-auto no-scrollbar pb-2 md:pb-0">
+<button data-filter="all" class="filter-btn whitespace-nowrap px-4 py-2 bg-primary text-on-primary rounded-full font-label-caps text-label-caps border border-primary">All</button>
+<button data-filter="available" class="filter-btn whitespace-nowrap px-4 py-2 bg-surface-container-lowest text-on-surface rounded-full font-label-caps text-label-caps border border-outline-variant">Available</button>
+<button data-filter="rented" class="filter-btn whitespace-nowrap px-4 py-2 bg-surface-container-lowest text-on-surface rounded-full font-label-caps text-label-caps border border-outline-variant">Rented</button>
+</div>
+</div>
+<div id="bike-grid" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+<div class="text-on-surface-variant">Loading fleet...</div>
+</div>
+</div>
+</main>
+<script>
+  const TOKEN = ${JSON.stringify(token)};
+  let ALL_BIKES = [];
+  let activeFilter = 'all';
+
+  function badgeClasses(status) {
+    const s = (status || '').toLowerCase();
+    if (s === 'rented') return 'bg-blue-100 text-blue-800 border-blue-200';
+    if (s === 'maintenance') return 'bg-amber-100 text-amber-800 border-amber-200';
+    return 'bg-green-100 text-green-800 border-green-200';
+  }
+
+  function bikeCard(b) {
+    const badge = badgeClasses(b.status);
+    const extra = (b.status || '').toLowerCase() === 'rented'
+      ? \`<div class="mt-3 bg-surface-container-low p-2 rounded border border-outline-variant/50">
+           <p class="font-body-md text-body-md"><span class="font-semibold">Renter:</span> \${b.renterName || '-'}</p>
+           <p class="font-body-md text-body-md text-on-surface-variant mt-1">Expected return: \${b.expectedReturn || '-'}</p>
+         </div>\`
+      : '';
+    return \`<article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col gap-3 hover:shadow-md transition-shadow">
+      <div class="flex justify-between items-start">
+        <div>
+          <h3 class="font-headline-md text-headline-md text-on-surface font-semibold">\${b.model || b.bikeId}</h3>
+          <p class="font-label-caps text-label-caps text-on-surface-variant mt-1">\${b.bikeId}\${b.color ? ' • ' + b.color : ''}</p>
+        </div>
+        <div class="px-3 py-1 rounded-full font-status-badge text-status-badge uppercase border \${badge}">\${b.status || 'Available'}</div>
+      </div>
+      \${extra}
+    </article>\`;
+  }
+
+  function renderBikes() {
+    const grid = document.getElementById('bike-grid');
+    const query = document.getElementById('search-input').value.trim().toLowerCase();
+    let filtered = ALL_BIKES.filter(b => {
+      const status = (b.status || 'available').toLowerCase();
+      if (activeFilter === 'available' && status !== 'available' && status !== '') return false;
+      if (activeFilter === 'rented' && status !== 'rented') return false;
+      if (query) {
+        const haystack = \`\${b.bikeId} \${b.model} \${b.status}\`.toLowerCase();
+        if (!haystack.includes(query)) return false;
+      }
+      return true;
+    });
+    grid.innerHTML = filtered.length
+      ? filtered.map(bikeCard).join('')
+      : '<div class="text-on-surface-variant">No bikes match.</div>';
+  }
+
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeFilter = btn.dataset.filter;
+      document.querySelectorAll('.filter-btn').forEach(b => {
+        b.classList.remove('bg-primary', 'text-on-primary', 'border-primary');
+        b.classList.add('bg-surface-container-lowest', 'text-on-surface', 'border-outline-variant');
+      });
+      btn.classList.remove('bg-surface-container-lowest', 'text-on-surface', 'border-outline-variant');
+      btn.classList.add('bg-primary', 'text-on-primary', 'border-primary');
+      renderBikes();
+    });
+  });
+  document.getElementById('search-input').addEventListener('input', renderBikes);
+
+  async function loadBikes() {
+    try {
+      const res = await fetch('/api/toh/motorbikes' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
+      const data = await res.json();
+      if (data.error) {
+        document.getElementById('bike-grid').innerHTML = '<div class="text-error">' + data.error + '</div>';
+        return;
+      }
+      ALL_BIKES = data.bikes;
+      renderBikes();
+    } catch (err) {
+      document.getElementById('bike-grid').innerHTML = '<div class="text-error">Failed to load fleet data</div>';
+    }
+  }
+  loadBikes();
+</script>
+</body></html>`);
+});
+
 app.listen(3000, () => console.log('TOH Rental Bot running on port 3000'));
