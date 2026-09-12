@@ -695,6 +695,41 @@ app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
 });
 
+// Asks Gemini to extract booking fields from the confirmed booking summary
+// text as structured JSON (constrained by responseSchema) instead of relying
+// on regex against freeform text. This is what actually fixes the root cause
+// of the messy Price/date data — regex on freeform text is fragile if the
+// model's wording drifts even slightly, JSON schema mode forces the shape.
+async function extractBookingJSON(summaryText) {
+  const schema = {
+    type: 'OBJECT',
+    properties: {
+      name: { type: 'STRING' },
+      phone: { type: 'STRING' },
+      bike: { type: 'STRING' },
+      startDate: { type: 'STRING' },
+      endDate: { type: 'STRING' },
+      location: { type: 'STRING' },
+      price: { type: 'NUMBER' },
+    },
+    required: ['name', 'phone', 'bike', 'startDate', 'endDate', 'location', 'price'],
+  };
+  const prompt = `Extract the booking details from this confirmed booking summary into the given JSON schema. The "price" field must be ONLY the total number in THB (no currency symbol, no words, no per-day rate) - e.g. if the summary says "Price: 3750 THB", price should be 3750. If a field is genuinely missing from the summary, use an empty string for text fields or 0 for price. Do not invent details that aren't in the summary.\n\nBooking summary:\n${summaryText}`;
+
+  const response = await axios.post(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: schema,
+      },
+    }
+  );
+  const jsonText = response.data.candidates[0].content.parts[0].text;
+  return JSON.parse(jsonText);
+}
+
 async function handleMessage(from, text) {
   const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
   if (!conversations[from]) {
@@ -783,15 +818,32 @@ Be friendly, helpful and concise. Answer in the same language the customer write
       await sendWhatsApp(from, 'Booking confirmed!\n\n' + cleanReply);
       await notifyStaff(`NEW BOOKING from +${from}:\n\n${cleanReply}`);
 
-      const bookingData = {
-        name: cleanReply.match(/Full Name[:\s]+([^\n]+)/i)?.[1],
-        phone: cleanReply.match(/Phone Number[:\s]+([^\n]+)/i)?.[1] || from,
-        bike: cleanReply.match(/Bike Type[:\s]+([^\n]+)/i)?.[1],
-        startDate: cleanReply.match(/Start Date[:\s]+([^\n]+)/i)?.[1],
-        endDate: cleanReply.match(/End Date[:\s]+([^\n]+)/i)?.[1],
-        location: cleanReply.match(/Pickup Location[:\s]+([^\n]+)/i)?.[1],
-        price: cleanReply.match(/Price[:\s]+([^\n]+)/i)?.[1],
-      };
+      let bookingData;
+      try {
+        const extracted = await extractBookingJSON(cleanReply);
+        bookingData = {
+          name: extracted.name,
+          phone: extracted.phone || from,
+          bike: extracted.bike,
+          startDate: extracted.startDate,
+          endDate: extracted.endDate,
+          location: extracted.location,
+          price: extracted.price ? `${extracted.price} THB` : '',
+        };
+      } catch (jsonErr) {
+        // Structured extraction failed (e.g. Gemini hiccup) — fall back to the
+        // old regex approach so a booking never silently fails to log at all.
+        console.error('Booking JSON extraction failed, falling back to regex:', jsonErr.message);
+        bookingData = {
+          name: cleanReply.match(/Full Name[:\s]+([^\n]+)/i)?.[1],
+          phone: cleanReply.match(/Phone Number[:\s]+([^\n]+)/i)?.[1] || from,
+          bike: cleanReply.match(/Bike Type[:\s]+([^\n]+)/i)?.[1],
+          startDate: cleanReply.match(/Start Date[:\s]+([^\n]+)/i)?.[1],
+          endDate: cleanReply.match(/End Date[:\s]+([^\n]+)/i)?.[1],
+          location: cleanReply.match(/Pickup Location[:\s]+([^\n]+)/i)?.[1],
+          price: cleanReply.match(/Price[:\s]+([^\n]+)/i)?.[1],
+        };
+      }
       await appendToSheet(bookingData);
       const totalAmount = parseThbAmount(bookingData.price);
       if (totalAmount > 0) {
