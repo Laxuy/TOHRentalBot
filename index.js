@@ -161,6 +161,17 @@ async function logFinance(type, bike, amount, description, reportedBy) {
 async function ensureTasksHeader(sheetId = SHEET_ID) {
   try {
     const sheets = google.sheets({ version: 'v4', auth });
+    const meta = await sheets.spreadsheets.get({
+      spreadsheetId: sheetId,
+      fields: 'sheets.properties.title',
+    });
+    const titles = (meta.data.sheets || []).map(s => s.properties.title);
+    if (!titles.includes('Tasks')) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: sheetId,
+        resource: { requests: [{ addSheet: { properties: { title: 'Tasks' } } }] },
+      });
+    }
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: sheetId,
       range: 'Tasks!A1:F1',
