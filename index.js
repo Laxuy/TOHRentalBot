@@ -125,6 +125,20 @@ function parseThbAmount(str) {
   return match ? parseFloat(match[0]) : 0;
 }
 
+// Stricter than parseThbAmount above: used by the Dashboard aggregation so
+// messy AI-parsed rows (e.g. a full sentence in the Price column instead of
+// a number) get SKIPPED from revenue totals rather than silently mis-parsed.
+// Only accepts a plain number, optionally with commas/decimals and a
+// trailing "THB" - anything else (extra words, placeholders) returns null.
+function parseCleanPrice(str) {
+  if (!str) return null;
+  const trimmed = String(str).trim();
+  const match = trimmed.match(/^([\d,]+(?:\.\d+)?)\s*(THB)?$/i);
+  if (!match) return null;
+  const num = parseFloat(match[1].replace(/,/g, ''));
+  return isNaN(num) ? null : num;
+}
+
 async function logFinance(type, bike, amount, description, reportedBy) {
   try {
     await ensureFinanceHeader();
@@ -744,6 +758,55 @@ async function getRecentPhotos(limit = 10) {
   }));
 }
 
+// Aggregates fleet + booking data for the Operations OS Dashboard screen.
+// Booking price rows that don't parse as a clean number (e.g. leftover AI
+// placeholders like "[Current Date in Koh Samui]" or a full sentence instead
+// of a number) are counted separately and excluded from totalRevenue, so
+// messy legacy rows don't corrupt the numbers or crash the page.
+async function getDashboardStats(shop) {
+  const [bikes, bookings] = await Promise.all([
+    getFleetList(shop.fleetSheetId),
+    getRecentBookings(1000, shop.sheetId),
+  ]);
+
+  const fleetTotal = bikes.length;
+  const fleetRented = bikes.filter(b => (b.status || '').toLowerCase() === 'rented').length;
+  const fleetAvailable = bikes.filter(b => {
+    const s = (b.status || '').toLowerCase();
+    return s === '' || s === 'available';
+  }).length;
+  const fleetOther = fleetTotal - fleetRented - fleetAvailable; // e.g. "Maintenance"
+
+  let totalRevenue = 0;
+  let cleanBookingCount = 0;
+  let skippedBookingCount = 0;
+  bookings.forEach(b => {
+    const amount = parseCleanPrice(b.price);
+    if (amount !== null) {
+      totalRevenue += amount;
+      cleanBookingCount += 1;
+    } else {
+      skippedBookingCount += 1;
+    }
+  });
+
+  return {
+    fleet: {
+      total: fleetTotal,
+      available: fleetAvailable,
+      rented: fleetRented,
+      other: fleetOther,
+    },
+    bookings: {
+      totalCount: bookings.length,
+      cleanBookingCount,
+      skippedBookingCount,
+      totalRevenue,
+    },
+    recentBookings: bookings.slice(0, 5),
+  };
+}
+
 app.get('/api/dashboard-data', async (req, res) => {
   try {
     if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
@@ -815,6 +878,23 @@ app.get('/api/:shopId/rentals', async (req, res) => {
     res.json({ shop: shop.name, bookings, updatedAt: new Date().toISOString() });
   } catch (err) {
     console.error('Rentals API error:', err.message);
+    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+// Returns aggregated fleet + revenue stats for the Operations OS Dashboard
+// screen. Used by the /overview page below.
+app.get('/api/:shopId/dashboard', async (req, res) => {
+  try {
+    if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const shop = getShop(req.params.shopId);
+    const stats = await getDashboardStats(shop);
+    res.json({ shop: shop.name, ...stats, updatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error('Dashboard API error:', err.message);
     const status = err.message.startsWith('Unknown shop') ? 404 : 500;
     res.status(status).json({ error: err.message });
   }
@@ -949,6 +1029,10 @@ app.get('/motorbikes', (req, res) => {
 <h1 class="font-headline-md text-headline-md text-primary mb-6">TOH Rental</h1>
 </div>
 <nav class="flex flex-col gap-2">
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/overview?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">dashboard</span>
+<span class="font-label-caps text-label-caps">Overview</span>
+</a>
 <a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
 <span class="material-symbols-outlined">two_wheeler</span>
 <span class="font-label-caps text-label-caps">Motorbikes</span>
@@ -1154,6 +1238,10 @@ app.get('/rentals', (req, res) => {
 <h1 class="font-headline-md text-headline-md text-primary mb-6">TOH Rental</h1>
 </div>
 <nav class="flex flex-col gap-2">
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/overview?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">dashboard</span>
+<span class="font-label-caps text-label-caps">Overview</span>
+</a>
 <a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/motorbikes?token=${encodeURIComponent(token)}">
 <span class="material-symbols-outlined">two_wheeler</span>
 <span class="font-label-caps text-label-caps">Motorbikes</span>
@@ -1238,6 +1326,148 @@ app.get('/rentals', (req, res) => {
     }
   }
   loadRentals();
+</script>
+</body></html>`);
+});
+
+app.get('/overview', (req, res) => {
+  if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+    return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  }
+  const token = req.query.token || '';
+  res.send(`<!DOCTYPE html><html class="light" lang="en"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>Overview - TOH Rental</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com" rel="preconnect">
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
+<script id="tailwind-config">
+  tailwind.config = {
+    darkMode: "class",
+    theme: { extend: {
+      "colors": {
+        "outline-variant": "#c1c6d7", "background": "#faf8ff", "surface-container": "#eaedff",
+        "primary-container": "#0070eb", "surface-bright": "#faf8ff", "on-surface-variant": "#414755",
+        "surface-container-low": "#f2f3ff", "on-background": "#131b2e", "surface-container-lowest": "#ffffff",
+        "outline": "#717786", "secondary-container": "#d5e3fd", "on-surface": "#131b2e",
+        "surface": "#faf8ff", "surface-tint": "#005bc1", "secondary": "#515f74",
+        "surface-container-high": "#e2e7ff", "surface-container-highest": "#dae2fd",
+        "primary": "#0058bc", "on-primary": "#ffffff", "on-primary-container": "#fefcff",
+        "on-secondary-container": "#57657b", "error": "#ba1a1a"
+      },
+      "borderRadius": { "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem" },
+      "spacing": { "gutter": "16px", "md": "16px", "xs": "8px", "base": "4px", "margin-mobile": "16px", "margin-desktop": "32px", "sm": "12px", "xl": "32px", "lg": "24px" },
+      "fontFamily": { "status-badge": ["Inter"], "headline-md": ["Inter"], "body-md": ["Inter"], "body-lg": ["Inter"], "label-caps": ["JetBrains Mono"], "headline-lg": ["Inter"] },
+      "fontSize": {
+        "status-badge": ["12px", { "lineHeight": "12px", "fontWeight": "700" }],
+        "headline-md": ["20px", { "lineHeight": "28px", "fontWeight": "600" }],
+        "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
+        "label-caps": ["12px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600" }],
+        "headline-lg": ["24px", { "lineHeight": "32px", "fontWeight": "600" }]
+      }
+    } }
+  }
+</script>
+<style>
+  .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  body { min-height: max(884px, 100dvh); }
+</style>
+</head>
+<body class="bg-surface text-on-surface font-body-md min-h-screen flex flex-col md:flex-row">
+<header class="flex justify-between items-center w-full px-margin-mobile h-16 z-50 bg-surface border-b border-outline-variant md:hidden sticky top-0">
+<h1 class="font-headline-lg text-headline-lg font-bold text-primary tracking-tight">TOH Rental</h1>
+</header>
+<aside class="hidden md:flex flex-col h-full py-lg gap-xs bg-surface border-r border-outline-variant fixed left-0 top-0 w-[280px] z-40 overflow-y-auto no-scrollbar">
+<div class="px-4 mb-6">
+<h1 class="font-headline-md text-headline-md text-primary mb-6">TOH Rental</h1>
+</div>
+<nav class="flex flex-col gap-2">
+<a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
+<span class="material-symbols-outlined">dashboard</span>
+<span class="font-label-caps text-label-caps">Overview</span>
+</a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/motorbikes?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">two_wheeler</span>
+<span class="font-label-caps text-label-caps">Motorbikes</span>
+</a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rentals?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">receipt_long</span>
+<span class="font-label-caps text-label-caps">Rentals</span>
+</a>
+</nav>
+</aside>
+<main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
+<header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0">
+<h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Overview</h2>
+</header>
+<div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6">
+<div id="stat-cards" class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+  <div class="text-on-surface-variant col-span-full">Loading dashboard...</div>
+</div>
+<div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4">
+  <h3 class="font-headline-md text-headline-md text-on-surface font-semibold mb-3">Recent bookings</h3>
+  <div id="recent-list" class="flex flex-col gap-2">
+    <div class="text-on-surface-variant">Loading...</div>
+  </div>
+</div>
+</div>
+</main>
+<script>
+  const TOKEN = ${JSON.stringify(token)};
+
+  function statCard(label, value, icon) {
+    return \`<div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col gap-1">
+      <div class="flex items-center gap-2 text-on-surface-variant">
+        <span class="material-symbols-outlined text-[18px]">\${icon}</span>
+        <span class="font-label-caps text-label-caps">\${label}</span>
+      </div>
+      <span class="font-headline-lg text-headline-lg text-on-surface font-semibold">\${value}</span>
+    </div>\`;
+  }
+
+  function recentRow(b) {
+    return \`<div class="flex flex-col sm:flex-row sm:items-center justify-between gap-1 py-2 border-b border-outline-variant/50 last:border-0">
+      <div>
+        <span class="font-body-md text-on-surface font-semibold">\${b.name || '-'}</span>
+        <span class="font-body-md text-on-surface-variant"> · \${b.bike || '-'}</span>
+      </div>
+      <span class="font-body-md text-on-surface-variant">\${b.price || '-'}</span>
+    </div>\`;
+  }
+
+  async function loadOverview() {
+    try {
+      const res = await fetch('/api/toh/dashboard' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
+      const data = await res.json();
+      if (data.error) {
+        document.getElementById('stat-cards').innerHTML = '<div class="text-error col-span-full">' + data.error + '</div>';
+        return;
+      }
+      document.getElementById('stat-cards').innerHTML = [
+        statCard('Bikes Available', data.fleet.available + ' / ' + data.fleet.total, 'two_wheeler'),
+        statCard('Bikes Rented', data.fleet.rented, 'schedule'),
+        statCard('Total Bookings', data.bookings.totalCount, 'receipt_long'),
+        statCard('Revenue (clean rows)', data.bookings.totalRevenue.toLocaleString() + ' THB', 'payments'),
+      ].join('');
+
+      document.getElementById('recent-list').innerHTML = data.recentBookings.length
+        ? data.recentBookings.map(recentRow).join('')
+        : '<div class="text-on-surface-variant">No bookings yet</div>';
+
+      if (data.bookings.skippedBookingCount > 0) {
+        document.getElementById('recent-list').innerHTML += '<div class="text-on-surface-variant text-sm mt-2">' +
+          data.bookings.skippedBookingCount + ' older booking(s) skipped from revenue due to messy price data.</div>';
+      }
+    } catch (err) {
+      document.getElementById('stat-cards').innerHTML = '<div class="text-error col-span-full">Failed to load dashboard data</div>';
+    }
+  }
+  loadOverview();
 </script>
 </body></html>`);
 });
