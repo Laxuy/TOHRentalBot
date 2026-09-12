@@ -158,6 +158,85 @@ async function logFinance(type, bike, amount, description, reportedBy) {
   }
 }
 
+async function ensureTasksHeader(sheetId = SHEET_ID) {
+  try {
+    const sheets = google.sheets({ version: 'v4', auth });
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheetId,
+      range: 'Tasks!A1:F1',
+    });
+    const firstRow = res.data.values?.[0];
+    if (!firstRow || firstRow[0] !== 'Date') {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: sheetId,
+        range: 'Tasks!A1:F1',
+        valueInputOption: 'USER_ENTERED',
+        resource: {
+          values: [['Date', 'Type', 'Description', 'Contact', 'Status', 'Resolved At']]
+        }
+      });
+    }
+  } catch (err) {
+    console.error('Tasks header error:', err.message);
+  }
+}
+
+// Logs a low-confidence / needs-human-review event to the Tasks tab, so the
+// Operations OS AI Task Queue screen can show it (in addition to the existing
+// WhatsApp staff notification, which still fires separately for immediacy).
+async function logTask(type, description, contact, sheetId = SHEET_ID) {
+  try {
+    await ensureTasksHeader(sheetId);
+    const sheets = google.sheets({ version: 'v4', auth });
+    const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: sheetId,
+      range: 'Tasks!A:F',
+      valueInputOption: 'USER_ENTERED',
+      resource: {
+        values: [[now, type, description || '-', contact || '-', 'Open', '']]
+      }
+    });
+    console.log(`Task logged: ${type}`);
+  } catch (err) {
+    console.error('Task log error:', err.message);
+  }
+}
+
+// Returns every task row with its sheet row number as `id` (used to target
+// the right row when resolving). Most recent first.
+async function getTasks(sheetId = SHEET_ID) {
+  const sheets = google.sheets({ version: 'v4', auth });
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: sheetId,
+    range: 'Tasks!A2:F',
+  });
+  const rows = res.data.values || [];
+  return rows
+    .map((row, i) => ({
+      id: i + 2, // +2: header row + 1-indexing, matches the actual sheet row
+      date: row[0] || '',
+      type: row[1] || '',
+      description: row[2] || '',
+      contact: row[3] || '',
+      status: row[4] || 'Open',
+      resolvedAt: row[5] || '',
+    }))
+    .reverse();
+}
+
+async function resolveTask(taskId, sheetId = SHEET_ID) {
+  const sheets = google.sheets({ version: 'v4', auth });
+  const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: sheetId,
+    range: `E${taskId}:F${taskId}`,
+    valueInputOption: 'USER_ENTERED',
+    resource: { values: [['Resolved', now]] },
+  });
+  return { ok: true };
+}
+
 async function getFinanceSummary() {
   try {
     const sheets = google.sheets({ version: 'v4', auth });
@@ -475,13 +554,16 @@ async function handleIncomingPhoto(from, mediaId) {
           await notifyStaff(`✅ Auto-filled fleet sheet from contract photo (+${from}):\n${result.message}`);
         } else {
           await notifyStaff(`⚠️ Contract read OK but couldn't auto-fill (+${from}):\n${result.message}\nPlease enter manually.`);
+          await logTask('Contract Auto-fill Failed', result.message, `+${from}`);
         }
       } else {
         await notifyStaff(`⚠️ Contract photo from +${from} needs manual entry (low confidence or missing plate/name). Please check the photo above and use "rent <plate>".`);
+        await logTask('Contract Needs Manual Entry', 'Low confidence or missing plate/name in contract photo', `+${from}`);
       }
     } catch (extractErr) {
       console.error('Contract extraction error:', extractErr.message);
       await notifyStaff(`⚠️ Couldn't auto-read contract photo from +${from} — please enter manually.`);
+      await logTask('Contract Read Error', extractErr.message, `+${from}`);
     }
 
     await sendWhatsApp(from, 'Got it, sent to our team ✅');
@@ -690,6 +772,7 @@ Be friendly, helpful and concise. Answer in the same language the customer write
     } else if (reply.includes('NEED_HUMAN_HELP')) {
       await sendWhatsApp(from, 'No problem! Our staff will contact you shortly.');
       await notifyStaff(`Customer +${from} needs human help!\nLast message: ${text}`);
+      await logTask('Customer Needs Human Help', text, `+${from}`);
     } else {
       await sendWhatsApp(from, reply);
     }
@@ -900,6 +983,43 @@ app.get('/api/:shopId/dashboard', async (req, res) => {
   }
 });
 
+// Returns all logged low-confidence/needs-review events for a shop, used by
+// the AI Task Queue screen. Most recent first (see getTasks).
+app.get('/api/:shopId/tasks', async (req, res) => {
+  try {
+    if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const shop = getShop(req.params.shopId);
+    const tasks = await getTasks(shop.sheetId);
+    res.json({ shop: shop.name, tasks, updatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error('Tasks API error:', err.message);
+    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+// Marks one task row as Resolved from the AI Task Queue screen.
+app.post('/api/:shopId/tasks/:taskId/resolve', async (req, res) => {
+  try {
+    if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const shop = getShop(req.params.shopId);
+    const taskId = parseInt(req.params.taskId, 10);
+    if (!taskId || taskId < 2) {
+      return res.status(400).json({ error: 'Invalid task id' });
+    }
+    const result = await resolveTask(taskId, shop.sheetId);
+    res.json(result);
+  } catch (err) {
+    console.error('Resolve task error:', err.message);
+    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+
 app.get('/dashboard', (req, res) => {
   if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
     return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
@@ -1040,6 +1160,10 @@ app.get('/motorbikes', (req, res) => {
 <a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rentals?token=${encodeURIComponent(token)}">
 <span class="material-symbols-outlined">receipt_long</span>
 <span class="font-label-caps text-label-caps">Rentals</span>
+</a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/ai-tasks?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">smart_toy</span>
+<span class="font-label-caps text-label-caps">AI Tasks</span>
 </a>
 </nav>
 </aside>
@@ -1250,6 +1374,10 @@ app.get('/rentals', (req, res) => {
 <span class="material-symbols-outlined">receipt_long</span>
 <span class="font-label-caps text-label-caps">Rentals</span>
 </a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/ai-tasks?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">smart_toy</span>
+<span class="font-label-caps text-label-caps">AI Tasks</span>
+</a>
 </nav>
 </aside>
 <main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
@@ -1399,6 +1527,10 @@ app.get('/overview', (req, res) => {
 <span class="material-symbols-outlined">receipt_long</span>
 <span class="font-label-caps text-label-caps">Rentals</span>
 </a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/ai-tasks?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">smart_toy</span>
+<span class="font-label-caps text-label-caps">AI Tasks</span>
+</a>
 </nav>
 </aside>
 <main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
@@ -1468,6 +1600,200 @@ app.get('/overview', (req, res) => {
     }
   }
   loadOverview();
+</script>
+</body></html>`);
+});
+
+app.get('/ai-tasks', (req, res) => {
+  if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+    return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  }
+  const token = req.query.token || '';
+  res.send(`<!DOCTYPE html><html class="light" lang="en"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>AI Task Queue - TOH Rental</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com" rel="preconnect">
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
+<script id="tailwind-config">
+  tailwind.config = {
+    darkMode: "class",
+    theme: { extend: {
+      "colors": {
+        "outline-variant": "#c1c6d7", "background": "#faf8ff", "surface-container": "#eaedff",
+        "primary-container": "#0070eb", "surface-bright": "#faf8ff", "on-surface-variant": "#414755",
+        "surface-container-low": "#f2f3ff", "on-background": "#131b2e", "surface-container-lowest": "#ffffff",
+        "outline": "#717786", "secondary-container": "#d5e3fd", "on-surface": "#131b2e",
+        "surface": "#faf8ff", "surface-tint": "#005bc1", "secondary": "#515f74",
+        "surface-container-high": "#e2e7ff", "surface-container-highest": "#dae2fd",
+        "primary": "#0058bc", "on-primary": "#ffffff", "on-primary-container": "#fefcff",
+        "on-secondary-container": "#57657b", "error": "#ba1a1a"
+      },
+      "borderRadius": { "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem" },
+      "spacing": { "gutter": "16px", "md": "16px", "xs": "8px", "base": "4px", "margin-mobile": "16px", "margin-desktop": "32px", "sm": "12px", "xl": "32px", "lg": "24px" },
+      "fontFamily": { "status-badge": ["Inter"], "headline-md": ["Inter"], "body-md": ["Inter"], "body-lg": ["Inter"], "label-caps": ["JetBrains Mono"], "headline-lg": ["Inter"] },
+      "fontSize": {
+        "status-badge": ["12px", { "lineHeight": "12px", "fontWeight": "700" }],
+        "headline-md": ["20px", { "lineHeight": "28px", "fontWeight": "600" }],
+        "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
+        "label-caps": ["12px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600" }],
+        "headline-lg": ["24px", { "lineHeight": "32px", "fontWeight": "600" }]
+      }
+    } }
+  }
+</script>
+<style>
+  .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  body { min-height: max(884px, 100dvh); }
+</style>
+</head>
+<body class="bg-surface text-on-surface font-body-md min-h-screen flex flex-col md:flex-row">
+<header class="flex justify-between items-center w-full px-margin-mobile h-16 z-50 bg-surface border-b border-outline-variant md:hidden sticky top-0">
+<h1 class="font-headline-lg text-headline-lg font-bold text-primary tracking-tight">TOH Rental</h1>
+</header>
+<aside class="hidden md:flex flex-col h-full py-lg gap-xs bg-surface border-r border-outline-variant fixed left-0 top-0 w-[280px] z-40 overflow-y-auto no-scrollbar">
+<div class="px-4 mb-6">
+<h1 class="font-headline-md text-headline-md text-primary mb-6">TOH Rental</h1>
+</div>
+<nav class="flex flex-col gap-2">
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/overview?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">dashboard</span>
+<span class="font-label-caps text-label-caps">Overview</span>
+</a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/motorbikes?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">two_wheeler</span>
+<span class="font-label-caps text-label-caps">Motorbikes</span>
+</a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rentals?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">receipt_long</span>
+<span class="font-label-caps text-label-caps">Rentals</span>
+</a>
+<a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
+<span class="material-symbols-outlined">smart_toy</span>
+<span class="font-label-caps text-label-caps">AI Tasks</span>
+</a>
+</nav>
+</aside>
+<main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
+<header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0">
+<h2 class="font-headline-md text-headline-md text-on-surface font-semibold">AI Task Queue</h2>
+</header>
+<div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6">
+<div id="filter-bar" class="flex gap-2 overflow-x-auto no-scrollbar pb-2 md:pb-0">
+<button data-filter="open" class="filter-btn whitespace-nowrap px-4 py-2 bg-primary text-on-primary rounded-full font-label-caps text-label-caps border border-primary">Open</button>
+<button data-filter="resolved" class="filter-btn whitespace-nowrap px-4 py-2 bg-surface-container-lowest text-on-surface rounded-full font-label-caps text-label-caps border border-outline-variant">Resolved</button>
+<button data-filter="all" class="filter-btn whitespace-nowrap px-4 py-2 bg-surface-container-lowest text-on-surface rounded-full font-label-caps text-label-caps border border-outline-variant">All</button>
+</div>
+<div id="task-list" class="flex flex-col gap-3">
+<div class="text-on-surface-variant">Loading tasks...</div>
+</div>
+</div>
+</main>
+<script>
+  const TOKEN = ${JSON.stringify(token)};
+  let ALL_TASKS = [];
+  let activeFilter = 'open';
+
+  function typeIcon(type) {
+    if ((type || '').toLowerCase().includes('human help')) return 'support_agent';
+    if ((type || '').toLowerCase().includes('contract')) return 'description';
+    return 'smart_toy';
+  }
+
+  function taskCard(t) {
+    const isOpen = t.status === 'Open';
+    const badge = isOpen ? 'bg-amber-100 text-amber-800 border-amber-200' : 'bg-green-100 text-green-800 border-green-200';
+    const actionBtn = isOpen
+      ? \`<button class="resolve-btn px-4 py-2 bg-primary text-on-primary rounded-lg font-label-caps text-label-caps hover:bg-surface-tint transition-colors" data-task-id="\${t.id}">Mark Resolved</button>\`
+      : \`<span class="font-body-md text-on-surface-variant text-sm">Resolved \${t.resolvedAt || ''}</span>\`;
+    return \`<article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6">
+      <div class="w-10 h-10 rounded bg-surface-container flex items-center justify-center shrink-0 text-on-surface-variant">
+        <span class="material-symbols-outlined text-[20px]">\${typeIcon(t.type)}</span>
+      </div>
+      <div class="flex-1 grid grid-cols-1 sm:grid-cols-4 gap-2 sm:gap-4">
+        <div>
+          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Type</p>
+          <p class="font-body-md text-on-surface font-semibold">\${t.type || '-'}</p>
+          <p class="font-body-md text-on-surface-variant text-sm">\${t.contact || '-'}</p>
+        </div>
+        <div class="sm:col-span-2">
+          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Details</p>
+          <p class="font-body-md text-on-surface">\${t.description || '-'}</p>
+          <p class="font-body-md text-on-surface-variant text-sm">\${t.date || ''}</p>
+        </div>
+        <div class="flex items-center justify-between sm:justify-end gap-3">
+          <div class="px-3 py-1 rounded-full font-status-badge text-status-badge uppercase border \${badge}">\${t.status}</div>
+          \${actionBtn}
+        </div>
+      </div>
+    </article>\`;
+  }
+
+  function renderTasks() {
+    const list = document.getElementById('task-list');
+    let filtered = ALL_TASKS;
+    if (activeFilter === 'open') filtered = ALL_TASKS.filter(t => t.status === 'Open');
+    else if (activeFilter === 'resolved') filtered = ALL_TASKS.filter(t => t.status === 'Resolved');
+    list.innerHTML = filtered.length ? filtered.map(taskCard).join('') : '<div class="text-on-surface-variant">No tasks match.</div>';
+  }
+
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeFilter = btn.dataset.filter;
+      document.querySelectorAll('.filter-btn').forEach(b => {
+        b.classList.remove('bg-primary', 'text-on-primary', 'border-primary');
+        b.classList.add('bg-surface-container-lowest', 'text-on-surface', 'border-outline-variant');
+      });
+      btn.classList.remove('bg-surface-container-lowest', 'text-on-surface', 'border-outline-variant');
+      btn.classList.add('bg-primary', 'text-on-primary', 'border-primary');
+      renderTasks();
+    });
+  });
+
+  document.getElementById('task-list').addEventListener('click', async (e) => {
+    const btn = e.target.closest('.resolve-btn');
+    if (!btn) return;
+    btn.disabled = true;
+    btn.textContent = 'Resolving...';
+    try {
+      const res = await fetch('/api/toh/tasks/' + encodeURIComponent(btn.dataset.taskId) + '/resolve' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''), {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.error) {
+        alert(data.error);
+        btn.disabled = false;
+        btn.textContent = 'Mark Resolved';
+        return;
+      }
+      await loadTasks();
+    } catch (err) {
+      alert('Failed to resolve task');
+      btn.disabled = false;
+      btn.textContent = 'Mark Resolved';
+    }
+  });
+
+  async function loadTasks() {
+    try {
+      const res = await fetch('/api/toh/tasks' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
+      const data = await res.json();
+      if (data.error) {
+        document.getElementById('task-list').innerHTML = '<div class="text-error">' + data.error + '</div>';
+        return;
+      }
+      ALL_TASKS = data.tasks;
+      renderTasks();
+    } catch (err) {
+      document.getElementById('task-list').innerHTML = '<div class="text-error">Failed to load tasks</div>';
+    }
+  }
+  loadTasks();
 </script>
 </body></html>`);
 });
