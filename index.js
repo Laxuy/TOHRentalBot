@@ -99,6 +99,17 @@ async function appendToSheet(data) {
 async function ensureFinanceHeader() {
   try {
     const sheets = google.sheets({ version: 'v4', auth });
+    const meta = await sheets.spreadsheets.get({
+      spreadsheetId: SHEET_ID,
+      fields: 'sheets.properties.title',
+    });
+    const titles = (meta.data.sheets || []).map(s => s.properties.title);
+    if (!titles.includes('Finance')) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        resource: { requests: [{ addSheet: { properties: { title: 'Finance' } } }] },
+      });
+    }
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
       range: 'Finance!A1:F1',
