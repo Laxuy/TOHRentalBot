@@ -207,10 +207,17 @@ async function logTask(type, description, contact, sheetId = SHEET_ID) {
 // the right row when resolving). Most recent first.
 async function getTasks(sheetId = SHEET_ID) {
   const sheets = google.sheets({ version: 'v4', auth });
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range: 'Tasks!A2:F',
-  });
+  let res;
+  try {
+    res = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheetId,
+      range: 'Tasks!A2:F',
+    });
+  } catch (err) {
+    // Tasks tab doesn't exist yet (no task has ever been logged) — treat as empty.
+    console.error('Tasks read error (likely missing tab, treated as empty):', err.message);
+    return [];
+  }
   const rows = res.data.values || [];
   return rows
     .map((row, i) => ({
@@ -991,6 +998,7 @@ app.get('/api/:shopId/tasks', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const shop = getShop(req.params.shopId);
+    await ensureTasksHeader(shop.sheetId);
     const tasks = await getTasks(shop.sheetId);
     res.json({ shop: shop.name, tasks, updatedAt: new Date().toISOString() });
   } catch (err) {
