@@ -24,6 +24,20 @@ const MY_NUMBER = process.env.MY_NUMBER;
 // Optional: set DASHBOARD_TOKEN in Railway env vars to require ?token=... on /dashboard.
 // Leave unset during testing; set it before sharing the URL anywhere.
 const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || '';
+// Optional second token for the boss (or anyone else) — same full access as
+// DASHBOARD_TOKEN, but a distinct value so logs can show who did what.
+const BOSS_TOKEN = process.env.BOSS_TOKEN || '';
+
+// Checks the ?token= query param against every known valid token and
+// returns which person it belongs to, so route handlers can both gate
+// access and log a human-readable actor name for state-changing actions.
+function checkDashboardAuth(req) {
+  const token = req.query.token || '';
+  if (!DASHBOARD_TOKEN) return { ok: true, user: 'Unknown (no token set)' };
+  if (token === DASHBOARD_TOKEN) return { ok: true, user: 'Kris' };
+  if (BOSS_TOKEN && token === BOSS_TOKEN) return { ok: true, user: 'TOH' };
+  return { ok: false, user: null };
+}
 
 const conversations = {};
 const processedMessages = new Set();
@@ -973,7 +987,8 @@ async function getDashboardStats(shop) {
 
 app.get('/api/dashboard-data', async (req, res) => {
   try {
-    if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+    const auth = checkDashboardAuth(req);
+    if (!auth.ok) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const [bookings, photos, fleet, finance] = await Promise.all([
@@ -994,7 +1009,8 @@ app.get('/api/dashboard-data', async (req, res) => {
 // future shops get added to that config file with their own fleetSheetId.
 app.get('/api/:shopId/motorbikes', async (req, res) => {
   try {
-    if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+    const auth = checkDashboardAuth(req);
+    if (!auth.ok) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const shop = getShop(req.params.shopId);
@@ -1012,7 +1028,8 @@ app.get('/api/:shopId/motorbikes', async (req, res) => {
 // commands use, scoped to the given shop's fleet sheet.
 app.post('/api/:shopId/motorbikes/:bikeId/status', async (req, res) => {
   try {
-    if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+    const auth = checkDashboardAuth(req);
+    if (!auth.ok) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const shop = getShop(req.params.shopId);
@@ -1021,6 +1038,9 @@ app.post('/api/:shopId/motorbikes/:bikeId/status', async (req, res) => {
       return res.status(400).json({ error: 'status must be "Rented" or "Available"' });
     }
     const result = await setBikeStatus(req.params.bikeId, status, shop.fleetSheetId);
+    if (result.ok) {
+      console.log(`${auth.user} marked ${req.params.bikeId} as ${status} via Operations OS`);
+    }
     if (!result.ok) return res.status(404).json(result);
     res.json(result);
   } catch (err) {
@@ -1034,7 +1054,8 @@ app.post('/api/:shopId/motorbikes/:bikeId/status', async (req, res) => {
 // screen. Reuses getRecentBookings (same data the /dashboard uses for TOH).
 app.get('/api/:shopId/rentals', async (req, res) => {
   try {
-    if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+    const auth = checkDashboardAuth(req);
+    if (!auth.ok) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const shop = getShop(req.params.shopId);
@@ -1051,7 +1072,8 @@ app.get('/api/:shopId/rentals', async (req, res) => {
 // screen. Used by the /overview page below.
 app.get('/api/:shopId/dashboard', async (req, res) => {
   try {
-    if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+    const auth = checkDashboardAuth(req);
+    if (!auth.ok) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const shop = getShop(req.params.shopId);
@@ -1068,7 +1090,8 @@ app.get('/api/:shopId/dashboard', async (req, res) => {
 // the AI Task Queue screen. Most recent first (see getTasks).
 app.get('/api/:shopId/tasks', async (req, res) => {
   try {
-    if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+    const auth = checkDashboardAuth(req);
+    if (!auth.ok) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const shop = getShop(req.params.shopId);
@@ -1085,7 +1108,8 @@ app.get('/api/:shopId/tasks', async (req, res) => {
 // Marks one task row as Resolved from the AI Task Queue screen.
 app.post('/api/:shopId/tasks/:taskId/resolve', async (req, res) => {
   try {
-    if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+    const auth = checkDashboardAuth(req);
+    if (!auth.ok) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const shop = getShop(req.params.shopId);
@@ -1094,6 +1118,7 @@ app.post('/api/:shopId/tasks/:taskId/resolve', async (req, res) => {
       return res.status(400).json({ error: 'Invalid task id' });
     }
     const result = await resolveTask(taskId, shop.sheetId);
+    console.log(`${auth.user} marked task ${taskId} as Resolved`);
     res.json(result);
   } catch (err) {
     console.error('Resolve task error:', err.message);
@@ -1103,7 +1128,8 @@ app.post('/api/:shopId/tasks/:taskId/resolve', async (req, res) => {
 });
 
 app.get('/dashboard', (req, res) => {
-  if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) {
     return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
   }
   const token = req.query.token || '';
@@ -1175,7 +1201,8 @@ app.get('/dashboard', (req, res) => {
 });
 
 app.get('/motorbikes', (req, res) => {
-  if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) {
     return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
   }
   const token = req.query.token || '';
@@ -1388,7 +1415,8 @@ app.get('/motorbikes', (req, res) => {
 });
 
 app.get('/rentals', (req, res) => {
-  if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) {
     return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
   }
   const token = req.query.token || '';
@@ -1541,7 +1569,8 @@ app.get('/rentals', (req, res) => {
 });
 
 app.get('/overview', (req, res) => {
-  if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) {
     return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
   }
   const token = req.query.token || '';
@@ -1687,7 +1716,8 @@ app.get('/overview', (req, res) => {
 });
 
 app.get('/ai-tasks', (req, res) => {
-  if (DASHBOARD_TOKEN && req.query.token !== DASHBOARD_TOKEN) {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) {
     return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
   }
   const token = req.query.token || '';
