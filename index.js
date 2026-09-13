@@ -1314,6 +1314,10 @@ app.get('/motorbikes', (req, res) => {
 <span class="material-symbols-outlined">smart_toy</span>
 <span class="font-label-caps text-label-caps">AI Tasks</span>
 </a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/data-quality?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">fact_check</span>
+<span class="font-label-caps text-label-caps">Data Quality</span>
+</a>
 </nav>
 </aside>
 <main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
@@ -1528,6 +1532,10 @@ app.get('/rentals', (req, res) => {
 <span class="material-symbols-outlined">smart_toy</span>
 <span class="font-label-caps text-label-caps">AI Tasks</span>
 </a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/data-quality?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">fact_check</span>
+<span class="font-label-caps text-label-caps">Data Quality</span>
+</a>
 </nav>
 </aside>
 <main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
@@ -1682,6 +1690,10 @@ app.get('/overview', (req, res) => {
 <span class="material-symbols-outlined">smart_toy</span>
 <span class="font-label-caps text-label-caps">AI Tasks</span>
 </a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/data-quality?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">fact_check</span>
+<span class="font-label-caps text-label-caps">Data Quality</span>
+</a>
 </nav>
 </aside>
 <main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
@@ -1828,6 +1840,10 @@ app.get('/ai-tasks', (req, res) => {
 <a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
 <span class="material-symbols-outlined">smart_toy</span>
 <span class="font-label-caps text-label-caps">AI Tasks</span>
+</a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/data-quality?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">fact_check</span>
+<span class="font-label-caps text-label-caps">Data Quality</span>
 </a>
 </nav>
 </aside>
@@ -1984,21 +2000,81 @@ app.get('/data-quality', (req, res) => {
 <link href="https://fonts.googleapis.com" rel="preconnect">
 <link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
+<script id="tailwind-config">
+  tailwind.config = {
+    darkMode: "class",
+    theme: { extend: {
+      "colors": {
+        "outline-variant": "#c1c6d7", "background": "#faf8ff", "surface-container": "#eaedff",
+        "primary-container": "#0070eb", "surface-bright": "#faf8ff", "on-surface-variant": "#414755",
+        "surface-container-low": "#f2f3ff", "on-background": "#131b2e", "surface-container-lowest": "#ffffff",
+        "outline": "#717786", "secondary-container": "#d5e3fd", "on-surface": "#131b2e",
+        "surface": "#faf8ff", "surface-tint": "#005bc1", "secondary": "#515f74",
+        "surface-container-high": "#e2e7ff", "surface-container-highest": "#dae2fd",
+        "primary": "#0058bc", "on-primary": "#ffffff", "on-primary-container": "#fefcff",
+        "on-secondary-container": "#57657b", "error": "#ba1a1a"
+      },
+      "borderRadius": { "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem" },
+      "spacing": { "gutter": "16px", "md": "16px", "xs": "8px", "base": "4px", "margin-mobile": "16px", "margin-desktop": "32px", "sm": "12px", "xl": "32px", "lg": "24px" },
+      "fontFamily": { "status-badge": ["Inter"], "headline-md": ["Inter"], "body-md": ["Inter"], "body-lg": ["Inter"], "label-caps": ["JetBrains Mono"], "headline-lg": ["Inter"] },
+      "fontSize": {
+        "status-badge": ["12px", { "lineHeight": "12px", "fontWeight": "700" }],
+        "headline-md": ["20px", { "lineHeight": "28px", "fontWeight": "600" }],
+        "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
+        "label-caps": ["12px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600" }],
+        "headline-lg": ["24px", { "lineHeight": "32px", "fontWeight": "600" }]
+      }
+    } }
+  }
+</script>
 <style>
   .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
-  body { font-family: Inter, sans-serif; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  body { min-height: max(884px, 100dvh); }
 </style>
 </head>
-<body class="bg-[#faf8ff] text-[#131b2e] min-h-screen">
-<div class="max-w-5xl mx-auto p-6">
-<div class="flex items-center justify-between mb-2">
-  <h1 class="text-2xl font-semibold">Data Quality Report</h1>
-  <a href="/overview?token=${encodeURIComponent(token)}" class="text-[#0058bc] text-sm">&larr; Back to Overview</a>
+<body class="bg-surface text-on-surface font-body-md min-h-screen flex flex-col md:flex-row">
+<header class="flex justify-between items-center w-full px-margin-mobile h-16 z-50 bg-surface border-b border-outline-variant md:hidden sticky top-0">
+<h1 class="font-headline-lg text-headline-lg font-bold text-primary tracking-tight">TOH Rental</h1>
+</header>
+<aside class="hidden md:flex flex-col h-full py-lg gap-xs bg-surface border-r border-outline-variant fixed left-0 top-0 w-[280px] z-40 overflow-y-auto no-scrollbar">
+<div class="px-4 mb-6">
+<h1 class="font-headline-md text-headline-md text-primary mb-6">TOH Rental</h1>
 </div>
-<p class="text-[#414755] text-sm mb-6">Read-only list of booking rows with a messy price or placeholder-looking date. Nothing here is auto-fixed \u2014 edit the flagged rows directly in the Google Sheet with the correct values.</p>
-<div id="summary" class="text-[#414755] mb-4">Loading...</div>
+<nav class="flex flex-col gap-2">
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/overview?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">dashboard</span>
+<span class="font-label-caps text-label-caps">Overview</span>
+</a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/motorbikes?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">two_wheeler</span>
+<span class="font-label-caps text-label-caps">Motorbikes</span>
+</a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rentals?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">receipt_long</span>
+<span class="font-label-caps text-label-caps">Rentals</span>
+</a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/ai-tasks?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">smart_toy</span>
+<span class="font-label-caps text-label-caps">AI Tasks</span>
+</a>
+<a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
+<span class="material-symbols-outlined">fact_check</span>
+<span class="font-label-caps text-label-caps">Data Quality</span>
+</a>
+</nav>
+</aside>
+<main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
+<header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0">
+<h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Data Quality Report</h2>
+</header>
+<div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6">
+<p class="text-on-surface-variant text-sm">Read-only list of booking rows with a messy price or placeholder-looking date. Nothing here is auto-fixed \u2014 edit the flagged rows directly in the Google Sheet with the correct values.</p>
+<div id="summary" class="text-on-surface-variant"></div>
 <div id="report" class="flex flex-col gap-3"></div>
 </div>
+</main>
 <script>
   const TOKEN = ${JSON.stringify(token)};
   async function load() {
@@ -2006,29 +2082,29 @@ app.get('/data-quality', (req, res) => {
       const res = await fetch('/api/toh/data-quality' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
       const data = await res.json();
       if (data.error) {
-        document.getElementById('summary').innerHTML = '<span class="text-red-600">' + data.error + '</span>';
+        document.getElementById('summary').innerHTML = '<span class="text-error">' + data.error + '</span>';
         return;
       }
       document.getElementById('summary').textContent = data.issues.length + ' of ' + data.totalRows + ' booking rows need attention.';
       document.getElementById('report').innerHTML = data.issues.length ? data.issues.map(r => \`
-        <div class="bg-white border border-[#c1c6d7] rounded-xl p-4">
+        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4">
           <div class="flex justify-between items-start mb-2">
             <span class="font-semibold">Row \${r.row} \u2014 \${r.name || 'Unknown'} \u00b7 \${r.bike || '-'}</span>
-            <span class="text-xs text-[#717786]">\${r.date}</span>
+            <span class="text-xs text-on-surface-variant">\${r.date}</span>
           </div>
-          <div class="text-sm text-[#414755] grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
-            <div><span class="text-[#717786]">Start:</span> \${r.startDate || '-'}</div>
-            <div><span class="text-[#717786]">End:</span> \${r.endDate || '-'}</div>
-            <div><span class="text-[#717786]">Price:</span> \${r.price || '-'}</div>
-            <div><span class="text-[#717786]">Location:</span> \${r.location || '-'}</div>
+          <div class="text-sm text-on-surface-variant grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
+            <div><span class="text-on-surface-variant">Start:</span> \${r.startDate || '-'}</div>
+            <div><span class="text-on-surface-variant">End:</span> \${r.endDate || '-'}</div>
+            <div><span class="text-on-surface-variant">Price:</span> \${r.price || '-'}</div>
+            <div><span class="text-on-surface-variant">Location:</span> \${r.location || '-'}</div>
           </div>
           <div class="flex flex-wrap gap-1">
             \${r.problems.map(p => \`<span class="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200">\${p}</span>\`).join('')}
           </div>
         </div>
-      \`).join('') : '<div class="text-[#414755]">No issues found \ud83c\udf89</div>';
+      \`).join('') : '<div class="text-on-surface-variant">No issues found \ud83c\udf89</div>';
     } catch (err) {
-      document.getElementById('summary').innerHTML = '<span class="text-red-600">Failed to load report</span>';
+      document.getElementById('summary').innerHTML = '<span class="text-error">Failed to load report</span>';
     }
   }
   load();
