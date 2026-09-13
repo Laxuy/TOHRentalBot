@@ -259,7 +259,7 @@ async function resolveTask(taskId, sheetId = SHEET_ID) {
   const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
   await sheets.spreadsheets.values.update({
     spreadsheetId: sheetId,
-    range: `E${taskId}:F${taskId}`,
+    range: `Tasks!E${taskId}:F${taskId}`,
     valueInputOption: 'USER_ENTERED',
     resource: { values: [['Resolved', now]] },
   });
