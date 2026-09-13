@@ -280,6 +280,46 @@ async function resolveTask(taskId, sheetId = SHEET_ID) {
   return { ok: true };
 }
 
+// Reads Sheet1 with actual row numbers attached (unlike getRecentBookings,
+// which drops them) and flags rows with messy price or placeholder-looking
+// dates, for the /data-quality diagnostic report. Read-only — never edits
+// anything, since only a human can know what the correct value should be.
+async function getBookingsWithIssues(sheetId = SHEET_ID) {
+  const sheets = google.sheets({ version: 'v4', auth });
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: sheetId,
+    range: 'Sheet1!A2:I',
+  });
+  const rows = res.data.values || [];
+  const isCleanDate = (str) => {
+    if (!str) return false;
+    return /\d/.test(str) && !str.includes('[') && !str.includes(']');
+  };
+
+  const issues = [];
+  rows.forEach((row, i) => {
+    const booking = {
+      row: i + 2,
+      date: row[0] || '',
+      name: row[1] || '',
+      phone: row[2] || '',
+      bike: row[3] || '',
+      startDate: row[4] || '',
+      endDate: row[5] || '',
+      location: row[6] || '',
+      price: row[7] || '',
+    };
+    const problems = [];
+    if (parseCleanPrice(booking.price) === null) problems.push('Price is not a clean number');
+    if (!isCleanDate(booking.startDate)) problems.push('Start Date looks invalid/placeholder');
+    if (!isCleanDate(booking.endDate)) problems.push('End Date looks invalid/placeholder');
+    if (problems.length > 0) {
+      issues.push({ ...booking, problems });
+    }
+  });
+  return { totalRows: rows.length, issues };
+}
+
 async function getFinanceSummary() {
   try {
     const sheets = google.sheets({ version: 'v4', auth });
@@ -1906,6 +1946,92 @@ app.get('/ai-tasks', (req, res) => {
     }
   }
   loadTasks();
+</script>
+</body></html>`);
+});
+
+// Read-only diagnostic: lists Sheet1 rows with a messy price or
+// placeholder-looking date, so a human can fix them with the correct info.
+// Never edits anything itself.
+app.get('/api/:shopId/data-quality', async (req, res) => {
+  try {
+    const auth = checkDashboardAuth(req);
+    if (!auth.ok) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const shop = getShop(req.params.shopId);
+    const report = await getBookingsWithIssues(shop.sheetId);
+    res.json({ shop: shop.name, ...report, updatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error('Data quality API error:', err.message);
+    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+app.get('/data-quality', (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) {
+    return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  }
+  const token = req.query.token || '';
+  res.send(`<!DOCTYPE html><html class="light" lang="en"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>Data Quality Report - TOH Rental</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com" rel="preconnect">
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
+<style>
+  .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+  body { font-family: Inter, sans-serif; }
+</style>
+</head>
+<body class="bg-[#faf8ff] text-[#131b2e] min-h-screen">
+<div class="max-w-5xl mx-auto p-6">
+<div class="flex items-center justify-between mb-2">
+  <h1 class="text-2xl font-semibold">Data Quality Report</h1>
+  <a href="/overview?token=${encodeURIComponent(token)}" class="text-[#0058bc] text-sm">&larr; Back to Overview</a>
+</div>
+<p class="text-[#414755] text-sm mb-6">Read-only list of booking rows with a messy price or placeholder-looking date. Nothing here is auto-fixed \u2014 edit the flagged rows directly in the Google Sheet with the correct values.</p>
+<div id="summary" class="text-[#414755] mb-4">Loading...</div>
+<div id="report" class="flex flex-col gap-3"></div>
+</div>
+<script>
+  const TOKEN = ${JSON.stringify(token)};
+  async function load() {
+    try {
+      const res = await fetch('/api/toh/data-quality' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
+      const data = await res.json();
+      if (data.error) {
+        document.getElementById('summary').innerHTML = '<span class="text-red-600">' + data.error + '</span>';
+        return;
+      }
+      document.getElementById('summary').textContent = data.issues.length + ' of ' + data.totalRows + ' booking rows need attention.';
+      document.getElementById('report').innerHTML = data.issues.length ? data.issues.map(r => \`
+        <div class="bg-white border border-[#c1c6d7] rounded-xl p-4">
+          <div class="flex justify-between items-start mb-2">
+            <span class="font-semibold">Row \${r.row} \u2014 \${r.name || 'Unknown'} \u00b7 \${r.bike || '-'}</span>
+            <span class="text-xs text-[#717786]">\${r.date}</span>
+          </div>
+          <div class="text-sm text-[#414755] grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
+            <div><span class="text-[#717786]">Start:</span> \${r.startDate || '-'}</div>
+            <div><span class="text-[#717786]">End:</span> \${r.endDate || '-'}</div>
+            <div><span class="text-[#717786]">Price:</span> \${r.price || '-'}</div>
+            <div><span class="text-[#717786]">Location:</span> \${r.location || '-'}</div>
+          </div>
+          <div class="flex flex-wrap gap-1">
+            \${r.problems.map(p => \`<span class="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200">\${p}</span>\`).join('')}
+          </div>
+        </div>
+      \`).join('') : '<div class="text-[#414755]">No issues found \ud83c\udf89</div>';
+    } catch (err) {
+      document.getElementById('summary').innerHTML = '<span class="text-red-600">Failed to load report</span>';
+    }
+  }
+  load();
 </script>
 </body></html>`);
 });
