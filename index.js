@@ -372,6 +372,110 @@ async function getTodayBookings() {
 let fleetCache = { data: null, fetchedAt: 0 };
 const FLEET_CACHE_TTL_MS = 60 * 1000; // 1 minute
 
+// Parses a DD/MM/YYYY string (the en-GB format used everywhere in this file)
+// and returns the whole-day difference between two such dates, or null if
+// either can't be parsed.
+function daysBetweenEnGBDates(startStr, endStr) {
+  const parse = (s) => {
+    if (!s) return null;
+    const parts = String(s).split('/').map(Number);
+    const [d, m, y] = parts;
+    if (!d || !m || !y) return null;
+    return new Date(y, m - 1, d);
+  };
+  const start = parse(startStr);
+  const end = parse(endStr);
+  if (!start || !end) return null;
+  const diffMs = end - start;
+  return Math.max(0, Math.round(diffMs / (1000 * 60 * 60 * 24)));
+}
+
+async function ensureRentalHistoryHeader(sheetId) {
+  try {
+    const sheets = google.sheets({ version: 'v4', auth });
+    const meta = await sheets.spreadsheets.get({
+      spreadsheetId: sheetId,
+      fields: 'sheets.properties.title',
+    });
+    const titles = (meta.data.sheets || []).map(s => s.properties.title);
+    if (!titles.includes('RentalHistory')) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: sheetId,
+        resource: { requests: [{ addSheet: { properties: { title: 'RentalHistory' } } }] },
+      });
+    }
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheetId,
+      range: 'RentalHistory!A1:J1',
+    });
+    const firstRow = res.data.values?.[0];
+    if (!firstRow || firstRow[0] !== 'Date Logged') {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: sheetId,
+        range: 'RentalHistory!A1:J1',
+        valueInputOption: 'USER_ENTERED',
+        resource: {
+          values: [['Date Logged', 'Bike ID', 'Model', 'Renter Name', 'Renter Phone', 'Start Date', 'End Date', 'Days', 'Price (THB)', 'Logged By']]
+        }
+      });
+    }
+  } catch (err) {
+    console.error('Rental history header error:', err.message);
+  }
+}
+
+// Logs one completed rental (start -> end) for a specific bike. Called when
+// a bike gets marked Available again (i.e. a rental just ended), from either
+// the WhatsApp "return" command or the Motorbikes page.
+async function logRentalHistory(entry, sheetId) {
+  try {
+    await ensureRentalHistoryHeader(sheetId);
+    const sheets = google.sheets({ version: 'v4', auth });
+    const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: sheetId,
+      range: 'RentalHistory!A:J',
+      valueInputOption: 'USER_ENTERED',
+      resource: {
+        values: [[now, entry.bikeId, entry.model, entry.renterName, entry.renterPhone, entry.startDate, entry.endDate, entry.days, entry.price || '', entry.loggedBy || '']]
+      }
+    });
+  } catch (err) {
+    console.error('Rental history log error:', err.message);
+  }
+}
+
+// Returns every logged history entry for one specific bike, most recent first.
+async function getRentalHistoryForBike(bikeId, sheetId) {
+  try {
+    const sheets = google.sheets({ version: 'v4', auth });
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheetId,
+      range: 'RentalHistory!A2:J',
+    });
+    const rows = res.data.values || [];
+    return rows
+      .filter(row => (row[1] || '').trim().toLowerCase() === bikeId.trim().toLowerCase())
+      .map(row => ({
+        dateLogged: row[0] || '',
+        bikeId: row[1] || '',
+        model: row[2] || '',
+        renterName: row[3] || '',
+        renterPhone: row[4] || '',
+        startDate: row[5] || '',
+        endDate: row[6] || '',
+        days: row[7] || '',
+        price: row[8] || '',
+        loggedBy: row[9] || '',
+      }))
+      .reverse();
+  } catch (err) {
+    // Tab likely doesn't exist yet (no return has ever been logged) — empty.
+    console.error('Rental history read error (treated as empty):', err.message);
+    return [];
+  }
+}
+
 async function findBikeRow(plateQuery, fleetSheetId = FLEET_SHEET_ID) {
   const sheets = google.sheets({ version: 'v4', auth });
   const res = await sheets.spreadsheets.values.get({
@@ -392,7 +496,7 @@ async function findBikeRow(plateQuery, fleetSheetId = FLEET_SHEET_ID) {
   return null;
 }
 
-async function setBikeStatus(plateQuery, status, fleetSheetId = FLEET_SHEET_ID) {
+async function setBikeStatus(plateQuery, status, fleetSheetId = FLEET_SHEET_ID, options = {}) {
   const match = await findBikeRow(plateQuery, fleetSheetId);
   if (!match) {
     return { ok: false, message: `Couldn't find a bike matching "${plateQuery}" in the fleet sheet.` };
@@ -400,6 +504,18 @@ async function setBikeStatus(plateQuery, status, fleetSheetId = FLEET_SHEET_ID) 
   const sheets = google.sheets({ version: 'v4', auth });
   const dateCol = status === 'Rented' ? 'G' : 'I'; // Rented Date or Returned Date
   const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok' });
+
+  // If this is a return, grab the row's current data first (model, renter
+  // info, rented date) before anything gets overwritten, so we can log a
+  // complete Rental History entry for this specific bike.
+  let priorRow = null;
+  if (status === 'Available') {
+    const rowRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: fleetSheetId,
+      range: `A${match.rowNumber}:K${match.rowNumber}`,
+    });
+    priorRow = rowRes.data.values?.[0] || [];
+  }
 
   await sheets.spreadsheets.values.update({
     spreadsheetId: fleetSheetId,
@@ -415,6 +531,22 @@ async function setBikeStatus(plateQuery, status, fleetSheetId = FLEET_SHEET_ID) 
   });
 
   fleetCache = { data: null, fetchedAt: 0 }; // force refresh next lookup
+
+  if (status === 'Available' && priorRow) {
+    const startDate = priorRow[6] || '';
+    logRentalHistory({
+      bikeId: match.bikeId,
+      model: priorRow[1] || '',
+      renterName: priorRow[4] || '',
+      renterPhone: priorRow[5] || '',
+      startDate,
+      endDate: today,
+      days: daysBetweenEnGBDates(startDate, today) ?? '',
+      price: options.price || '',
+      loggedBy: options.loggedBy || '',
+    }, fleetSheetId).catch(err => console.error('Rental history log failed:', err.message));
+  }
+
   return { ok: true, message: `${match.bikeId} marked as ${status}.` };
 }
 
@@ -698,9 +830,13 @@ app.post('/webhook', async (req, res) => {
             await sendWhatsApp(from, result.message);
             return res.sendStatus(200);
           }
-          const returnMatch = text.match(/^return\s+(.+)$/i);
+          const returnMatch = text.match(/^return\s+(\S+)(?:\s+(\d+(?:\.\d+)?))?\s*$/i);
           if (returnMatch) {
-            const result = await setBikeStatus(returnMatch[1], 'Available');
+            const [, plate, priceStr] = returnMatch;
+            const result = await setBikeStatus(plate, 'Available', FLEET_SHEET_ID, {
+              price: priceStr || '',
+              loggedBy: `WhatsApp Staff +${from}`,
+            });
             await sendWhatsApp(from, result.message);
             return res.sendStatus(200);
           }
@@ -722,7 +858,7 @@ app.post('/webhook', async (req, res) => {
             return res.sendStatus(200);
           }
           if (cmd === 'help' || cmd === 'commands') {
-            await sendWhatsApp(from, "Staff commands:\n- fleet: full bike availability\n- list today: today's bookings\n- rent <plate>: mark a bike as rented (e.g. rent 3990)\n- return <plate>: mark a bike as available (e.g. return 3990)\n- expense <plate> <amount> <description>: log an expense (e.g. expense 3990 500 broken mirror)\n- finance: income/expense/profit summary");
+            await sendWhatsApp(from, "Staff commands:\n- fleet: full bike availability\n- list today: today's bookings\n- rent <plate>: mark a bike as rented (e.g. rent 3990)\n- return <plate> [price]: mark a bike as available, optionally logging the price paid (e.g. return 3990 1200)\n- expense <plate> <amount> <description>: log an expense (e.g. expense 3990 500 broken mirror)\n- finance: income/expense/profit summary");
             return res.sendStatus(200);
           }
           // Any other message from a staff number is treated as internal chat,
@@ -1073,11 +1209,14 @@ app.post('/api/:shopId/motorbikes/:bikeId/status', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const shop = getShop(req.params.shopId);
-    const { status } = req.body || {};
+    const { status, price } = req.body || {};
     if (!['Rented', 'Available'].includes(status)) {
       return res.status(400).json({ error: 'status must be "Rented" or "Available"' });
     }
-    const result = await setBikeStatus(req.params.bikeId, status, shop.fleetSheetId);
+    const result = await setBikeStatus(req.params.bikeId, status, shop.fleetSheetId, {
+      price: price || '',
+      loggedBy: auth.user,
+    });
     if (result.ok) {
       console.log(`${auth.user} marked ${req.params.bikeId} as ${status} via Operations OS`);
     }
@@ -1087,6 +1226,27 @@ app.post('/api/:shopId/motorbikes/:bikeId/status', async (req, res) => {
     console.error('Update bike status error:', err.message);
     const httpStatus = err.message.startsWith('Unknown shop') ? 404 : 500;
     res.status(httpStatus).json({ error: err.message });
+  }
+});
+
+// Returns one bike's current info plus its full logged rental history
+// (start/end dates, days, price) for the bike detail panel on /motorbikes.
+app.get('/api/:shopId/motorbikes/:bikeId/history', async (req, res) => {
+  try {
+    const auth = checkDashboardAuth(req);
+    if (!auth.ok) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const shop = getShop(req.params.shopId);
+    const bikes = await getFleetList(shop.fleetSheetId);
+    const bike = bikes.find(b => b.bikeId === req.params.bikeId);
+    if (!bike) return res.status(404).json({ error: 'Bike not found' });
+    const history = await getRentalHistoryForBike(req.params.bikeId, shop.fleetSheetId);
+    res.json({ bike, history, updatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error('Bike history API error:', err.message);
+    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
+    res.status(status).json({ error: err.message });
   }
 });
 
@@ -1341,6 +1501,14 @@ app.get('/motorbikes', (req, res) => {
 </div>
 </div>
 </main>
+<div id="detail-modal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+  <div class="bg-surface-container-lowest rounded-xl max-w-lg w-full max-h-[85vh] overflow-y-auto p-5 relative">
+    <button id="close-modal-btn" class="absolute top-3 right-3 text-on-surface-variant hover:text-on-surface">
+      <span class="material-symbols-outlined">close</span>
+    </button>
+    <div id="modal-body">Loading...</div>
+  </div>
+</div>
 <script>
   const TOKEN = ${JSON.stringify(token)};
   let ALL_BIKES = [];
@@ -1367,10 +1535,10 @@ app.get('/motorbikes', (req, res) => {
     const bikeIdAttr = b.bikeId.replace(/"/g, '&quot;');
     return \`<article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col gap-3 hover:shadow-md transition-shadow">
       <div class="flex justify-between items-start">
-        <div>
-          <h3 class="font-headline-md text-headline-md text-on-surface font-semibold">\${b.model || b.bikeId}</h3>
+        <button class="view-history-btn text-left" data-bike-id="\${bikeIdAttr}">
+          <h3 class="font-headline-md text-headline-md text-on-surface font-semibold hover:text-primary transition-colors">\${b.model || b.bikeId}</h3>
           <p class="font-label-caps text-label-caps text-on-surface-variant mt-1">\${b.bikeId}\${b.color ? ' • ' + b.color : ''}</p>
-        </div>
+        </button>
         <div class="px-3 py-1 rounded-full font-status-badge text-status-badge uppercase border \${badge}">\${b.status || 'Available'}</div>
       </div>
       \${extra}
@@ -1413,8 +1581,21 @@ app.get('/motorbikes', (req, res) => {
   document.getElementById('search-input').addEventListener('input', renderBikes);
 
   document.getElementById('bike-grid').addEventListener('click', async (e) => {
+    const historyBtn = e.target.closest('.view-history-btn');
+    if (historyBtn) {
+      openHistoryModal(historyBtn.dataset.bikeId);
+      return;
+    }
     const btn = e.target.closest('.update-status-btn');
     if (!btn) return;
+
+    let price = '';
+    if (btn.dataset.newStatus === 'Available') {
+      const entered = prompt('Price received for this rental (THB)? Leave blank to skip.');
+      if (entered === null) return; // cancelled
+      price = entered.trim();
+    }
+
     const originalLabel = btn.textContent;
     btn.disabled = true;
     btn.textContent = 'Updating...';
@@ -1422,7 +1603,7 @@ app.get('/motorbikes', (req, res) => {
       const res = await fetch('/api/toh/motorbikes/' + encodeURIComponent(btn.dataset.bikeId) + '/status' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: btn.dataset.newStatus })
+        body: JSON.stringify({ status: btn.dataset.newStatus, price })
       });
       const data = await res.json();
       if (data.error) {
@@ -1437,6 +1618,49 @@ app.get('/motorbikes', (req, res) => {
       btn.disabled = false;
       btn.textContent = originalLabel;
     }
+  });
+
+  async function openHistoryModal(bikeId) {
+    const modal = document.getElementById('detail-modal');
+    const body = document.getElementById('modal-body');
+    body.innerHTML = 'Loading...';
+    modal.classList.remove('hidden');
+    try {
+      const res = await fetch('/api/toh/motorbikes/' + encodeURIComponent(bikeId) + '/history' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
+      const data = await res.json();
+      if (data.error) {
+        body.innerHTML = '<div class="text-error">' + data.error + '</div>';
+        return;
+      }
+      const b = data.bike;
+      const historyRows = data.history.length
+        ? data.history.map(h => \`
+          <div class="border-t border-outline-variant/50 py-2 text-sm">
+            <div class="flex justify-between">
+              <span class="font-semibold">\${h.renterName || 'Unknown'}</span>
+              <span class="text-on-surface-variant">\${h.price ? h.price + ' THB' : '-'}</span>
+            </div>
+            <div class="text-on-surface-variant">\${h.startDate || '-'} \u2192 \${h.endDate || '-'} (\${h.days || '?'} days)</div>
+          </div>\`).join('')
+        : '<div class="text-on-surface-variant text-sm mt-2">No rental history logged yet for this bike.</div>';
+
+      body.innerHTML = \`
+        <h3 class="font-headline-md text-headline-md font-semibold mb-1">\${b.model || b.bikeId}</h3>
+        <p class="font-label-caps text-label-caps text-on-surface-variant mb-3">\${b.bikeId}\${b.color ? ' • ' + b.color : ''}</p>
+        <div class="text-sm text-on-surface-variant mb-4">Location: \${b.location || '-'} &middot; Status: \${b.status || 'Available'}</div>
+        <h4 class="font-semibold text-sm mb-1">Rental History</h4>
+        \${historyRows}
+      \`;
+    } catch (err) {
+      body.innerHTML = '<div class="text-error">Failed to load bike details</div>';
+    }
+  }
+
+  document.getElementById('close-modal-btn').addEventListener('click', () => {
+    document.getElementById('detail-modal').classList.add('hidden');
+  });
+  document.getElementById('detail-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'detail-modal') document.getElementById('detail-modal').classList.add('hidden');
   });
 
   async function loadBikes() {
