@@ -504,6 +504,7 @@ async function setBikeStatus(plateQuery, status, fleetSheetId = FLEET_SHEET_ID, 
   const sheets = google.sheets({ version: 'v4', auth });
   const dateCol = status === 'Rented' ? 'G' : 'I'; // Rented Date or Returned Date
   const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok' });
+  const dateValue = (status === 'Rented' && options.rentedDate) ? options.rentedDate : today;
 
   // If this is a return, grab the row's current data first (model, renter
   // info, rented date) before anything gets overwritten, so we can log a
@@ -527,8 +528,20 @@ async function setBikeStatus(plateQuery, status, fleetSheetId = FLEET_SHEET_ID, 
     spreadsheetId: fleetSheetId,
     range: `${dateCol}${match.rowNumber}`,
     valueInputOption: 'USER_ENTERED',
-    resource: { values: [[today]] },
+    resource: { values: [[dateValue]] },
   });
+
+  // "Enter Details" flow on Mark Rented — also write renter name/phone and
+  // expected return, so this rental's info isn't left blank or stale from
+  // whoever had the bike last time.
+  if (status === 'Rented' && (options.renterName || options.renterPhone || options.expectedReturn)) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: fleetSheetId,
+      range: `E${match.rowNumber}:H${match.rowNumber}`,
+      valueInputOption: 'USER_ENTERED',
+      resource: { values: [[options.renterName || '', options.renterPhone || '', dateValue, options.expectedReturn || '']] },
+    });
+  }
 
   fleetCache = { data: null, fetchedAt: 0 }; // force refresh next lookup
 
@@ -1209,13 +1222,17 @@ app.post('/api/:shopId/motorbikes/:bikeId/status', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const shop = getShop(req.params.shopId);
-    const { status, price } = req.body || {};
+    const { status, price, renterName, renterPhone, rentedDate, expectedReturn } = req.body || {};
     if (!['Rented', 'Available'].includes(status)) {
       return res.status(400).json({ error: 'status must be "Rented" or "Available"' });
     }
     const result = await setBikeStatus(req.params.bikeId, status, shop.fleetSheetId, {
       price: price || '',
       loggedBy: auth.user,
+      renterName: renterName || '',
+      renterPhone: renterPhone || '',
+      rentedDate: rentedDate || '',
+      expectedReturn: expectedReturn || '',
     });
     if (result.ok) {
       console.log(`${auth.user} marked ${req.params.bikeId} as ${status} via Operations OS`);
@@ -1507,6 +1524,39 @@ app.get('/motorbikes', (req, res) => {
 </button>
 <div id="history-body">Loading...</div>
 </div>
+<div id="details-view" class="hidden">
+<button id="back-from-details-btn" class="flex items-center gap-2 text-primary font-label-caps text-label-caps mb-4 hover:underline">
+  <span class="material-symbols-outlined text-[18px]">arrow_back</span> Back to Motorbikes
+</button>
+<div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6 max-w-lg">
+  <h3 id="details-title" class="font-headline-md text-headline-md font-semibold text-on-surface mb-4"></h3>
+  <form id="details-form" class="flex flex-col gap-4">
+    <div>
+      <label class="font-label-caps text-label-caps text-on-surface-variant block mb-1">Renter Name</label>
+      <input id="details-renter-name" type="text" class="w-full px-3 py-2 bg-surface border border-outline-variant rounded-lg font-body-md text-body-md">
+    </div>
+    <div>
+      <label class="font-label-caps text-label-caps text-on-surface-variant block mb-1">Phone</label>
+      <input id="details-renter-phone" type="text" class="w-full px-3 py-2 bg-surface border border-outline-variant rounded-lg font-body-md text-body-md">
+    </div>
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <label class="font-label-caps text-label-caps text-on-surface-variant block mb-1">Rent Date</label>
+        <input id="details-rent-date" type="date" class="w-full px-3 py-2 bg-surface border border-outline-variant rounded-lg font-body-md text-body-md">
+      </div>
+      <div>
+        <label class="font-label-caps text-label-caps text-on-surface-variant block mb-1">Expected Return</label>
+        <input id="details-expected-return" type="date" class="w-full px-3 py-2 bg-surface border border-outline-variant rounded-lg font-body-md text-body-md">
+      </div>
+    </div>
+    <div>
+      <label class="font-label-caps text-label-caps text-on-surface-variant block mb-1">Price (THB, optional)</label>
+      <input id="details-price" type="number" class="w-full px-3 py-2 bg-surface border border-outline-variant rounded-lg font-body-md text-body-md" placeholder="e.g. 1200">
+    </div>
+    <button type="submit" id="details-submit-btn" class="px-4 py-2 bg-primary text-on-primary rounded-lg font-label-caps text-label-caps hover:bg-surface-tint transition-colors">Mark Rented</button>
+  </form>
+</div>
+</div>
 </div>
 </main>
 <script>
@@ -1543,7 +1593,9 @@ app.get('/motorbikes', (req, res) => {
       </div>
       \${extra}
       <div class="mt-1 flex gap-2">
-        <button class="update-status-btn flex-1 px-4 py-2 bg-primary text-on-primary rounded-lg font-label-caps text-label-caps hover:bg-surface-tint transition-colors" data-bike-id="\${bikeIdAttr}" data-new-status="\${newStatus}">\${actionLabel}</button>
+        <div class="status-action flex-1" data-bike-id="\${bikeIdAttr}">
+          <button class="update-status-btn w-full px-4 py-2 bg-primary text-on-primary rounded-lg font-label-caps text-label-caps hover:bg-surface-tint transition-colors" data-bike-id="\${bikeIdAttr}" data-new-status="\${newStatus}">\${actionLabel}</button>
+        </div>
         <button class="view-history-btn px-4 py-2 bg-surface-container-lowest text-on-surface rounded-lg font-label-caps text-label-caps border border-outline-variant hover:bg-surface-container-high transition-colors" data-bike-id="\${bikeIdAttr}">History</button>
       </div>
     </article>\`;
@@ -1587,37 +1639,128 @@ app.get('/motorbikes', (req, res) => {
       openHistoryModal(historyBtn.dataset.bikeId);
       return;
     }
-    const btn = e.target.closest('.update-status-btn');
-    if (!btn) return;
 
-    let price = '';
-    if (btn.dataset.newStatus === 'Available') {
-      const entered = prompt('Price received for this rental (THB)? Leave blank to skip.');
-      if (entered === null) return; // cancelled
-      price = entered.trim();
+    // Clicking "Mark Rented" reveals two choices in place of the button
+    // instead of acting immediately.
+    const btn = e.target.closest('.update-status-btn');
+    if (btn && btn.dataset.newStatus === 'Rented') {
+      const wrapper = btn.closest('.status-action');
+      wrapper.innerHTML = \`
+        <div class="flex gap-2">
+          <button class="quick-mark-btn flex-1 px-3 py-2 bg-primary text-on-primary rounded-lg font-label-caps text-label-caps" data-bike-id="\${btn.dataset.bikeId}">Quick Mark</button>
+          <button class="enter-details-btn flex-1 px-3 py-2 bg-surface-container-lowest text-on-surface rounded-lg font-label-caps text-label-caps border border-outline-variant" data-bike-id="\${btn.dataset.bikeId}">Enter Details</button>
+          <button class="cancel-choice-btn px-2 text-on-surface-variant"><span class="material-symbols-outlined text-[18px]">close</span></button>
+        </div>\`;
+      return;
     }
 
+    const cancelBtn = e.target.closest('.cancel-choice-btn');
+    if (cancelBtn) {
+      renderBikes(); // resets all cards back to normal, cheap and safe
+      return;
+    }
+
+    const quickBtn = e.target.closest('.quick-mark-btn');
+    if (quickBtn) {
+      await submitStatusUpdate(quickBtn, quickBtn.dataset.bikeId, 'Rented', {});
+      return;
+    }
+
+    const detailsBtn = e.target.closest('.enter-details-btn');
+    if (detailsBtn) {
+      openDetailsView(detailsBtn.dataset.bikeId);
+      return;
+    }
+
+    // Mark Returned — unchanged, still just asks for a price via prompt.
+    if (btn && btn.dataset.newStatus === 'Available') {
+      const entered = prompt('Price received for this rental (THB)? Leave blank to skip.');
+      if (entered === null) return; // cancelled
+      await submitStatusUpdate(btn, btn.dataset.bikeId, 'Available', { price: entered.trim() });
+    }
+  });
+
+  async function submitStatusUpdate(btn, bikeId, status, extra) {
     const originalLabel = btn.textContent;
     btn.disabled = true;
     btn.textContent = 'Updating...';
     try {
-      const res = await fetch('/api/toh/motorbikes/' + encodeURIComponent(btn.dataset.bikeId) + '/status' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''), {
+      const res = await fetch('/api/toh/motorbikes/' + encodeURIComponent(bikeId) + '/status' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: btn.dataset.newStatus, price })
+        body: JSON.stringify({ status, ...extra })
       });
       const data = await res.json();
       if (data.error) {
         alert(data.error);
-        btn.disabled = false;
-        btn.textContent = originalLabel;
+        renderBikes();
         return;
       }
       await loadBikes();
     } catch (err) {
       alert('Failed to update status');
-      btn.disabled = false;
-      btn.textContent = originalLabel;
+      renderBikes();
+    }
+  }
+
+  let detailsTargetBikeId = null;
+  function toDMY(isoDate) {
+    if (!isoDate) return '';
+    const [y, m, d] = isoDate.split('-');
+    return \`\${d}/\${m}/\${y}\`;
+  }
+
+  function openDetailsView(bikeId) {
+    detailsTargetBikeId = bikeId;
+    const bike = ALL_BIKES.find(b => b.bikeId === bikeId);
+    document.getElementById('details-title').textContent = (bike ? bike.model + ' \u2014 ' + bike.bikeId : bikeId);
+    document.getElementById('details-renter-name').value = '';
+    document.getElementById('details-renter-phone').value = '';
+    document.getElementById('details-rent-date').value = new Date().toISOString().slice(0, 10);
+    document.getElementById('details-expected-return').value = '';
+    document.getElementById('details-price').value = '';
+    document.getElementById('grid-view').classList.add('hidden');
+    document.getElementById('details-view').classList.remove('hidden');
+  }
+
+  document.getElementById('back-from-details-btn').addEventListener('click', () => {
+    document.getElementById('details-view').classList.add('hidden');
+    document.getElementById('grid-view').classList.remove('hidden');
+    renderBikes();
+  });
+
+  document.getElementById('details-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const submitBtn = document.getElementById('details-submit-btn');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Saving...';
+    try {
+      const res = await fetch('/api/toh/motorbikes/' + encodeURIComponent(detailsTargetBikeId) + '/status' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          status: 'Rented',
+          renterName: document.getElementById('details-renter-name').value,
+          renterPhone: document.getElementById('details-renter-phone').value,
+          rentedDate: toDMY(document.getElementById('details-rent-date').value),
+          expectedReturn: toDMY(document.getElementById('details-expected-return').value),
+          price: document.getElementById('details-price').value,
+        })
+      });
+      const data = await res.json();
+      if (data.error) {
+        alert(data.error);
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Mark Rented';
+        return;
+      }
+      document.getElementById('details-view').classList.add('hidden');
+      document.getElementById('grid-view').classList.remove('hidden');
+      await loadBikes();
+    } catch (err) {
+      alert('Failed to save details');
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Mark Rented';
     }
   });
 
