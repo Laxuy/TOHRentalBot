@@ -1542,8 +1542,9 @@ app.get('/motorbikes', (req, res) => {
         <div class="px-3 py-1 rounded-full font-status-badge text-status-badge uppercase border \${badge}">\${b.status || 'Available'}</div>
       </div>
       \${extra}
-      <div class="mt-1">
-        <button class="update-status-btn px-4 py-2 bg-primary text-on-primary rounded-lg font-label-caps text-label-caps hover:bg-surface-tint transition-colors" data-bike-id="\${bikeIdAttr}" data-new-status="\${newStatus}">\${actionLabel}</button>
+      <div class="mt-1 flex gap-2">
+        <button class="update-status-btn flex-1 px-4 py-2 bg-primary text-on-primary rounded-lg font-label-caps text-label-caps hover:bg-surface-tint transition-colors" data-bike-id="\${bikeIdAttr}" data-new-status="\${newStatus}">\${actionLabel}</button>
+        <button class="view-history-btn px-4 py-2 bg-surface-container-lowest text-on-surface rounded-lg font-label-caps text-label-caps border border-outline-variant hover:bg-surface-container-high transition-colors" data-bike-id="\${bikeIdAttr}">History</button>
       </div>
     </article>\`;
   }
