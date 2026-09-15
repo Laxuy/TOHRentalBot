@@ -1501,11 +1501,8 @@ app.get('/motorbikes', (req, res) => {
 </div>
 </div>
 </main>
-<div id="detail-modal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-  <div class="bg-surface-container-lowest rounded-xl max-w-lg w-full max-h-[85vh] overflow-y-auto p-5 relative">
-    <button id="close-modal-btn" class="absolute top-3 right-3 text-on-surface-variant hover:text-on-surface">
-      <span class="material-symbols-outlined">close</span>
-    </button>
+<div id="detail-modal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 sm:p-8">
+  <div class="bg-surface-container-lowest rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-2xl">
     <div id="modal-body">Loading...</div>
   </div>
 </div>
@@ -1624,42 +1621,56 @@ app.get('/motorbikes', (req, res) => {
   async function openHistoryModal(bikeId) {
     const modal = document.getElementById('detail-modal');
     const body = document.getElementById('modal-body');
-    body.innerHTML = 'Loading...';
+    body.innerHTML = '<div class="p-6 text-on-surface-variant">Loading...</div>';
     modal.classList.remove('hidden');
     try {
       const res = await fetch('/api/toh/motorbikes/' + encodeURIComponent(bikeId) + '/history' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
       const data = await res.json();
       if (data.error) {
-        body.innerHTML = '<div class="text-error">' + data.error + '</div>';
+        body.innerHTML = '<div class="p-6 text-error">' + data.error + '</div>';
         return;
       }
       const b = data.bike;
+      const isRented = (b.status || '').toLowerCase() === 'rented';
+      const badge = isRented ? 'bg-blue-100 text-blue-800 border-blue-200' : 'bg-green-100 text-green-800 border-green-200';
+
       const historyRows = data.history.length
         ? data.history.map(h => \`
-          <div class="border-t border-outline-variant/50 py-2 text-sm">
-            <div class="flex justify-between">
-              <span class="font-semibold">\${h.renterName || 'Unknown'}</span>
-              <span class="text-on-surface-variant">\${h.price ? h.price + ' THB' : '-'}</span>
+          <div class="bg-surface-container-low rounded-xl p-4 flex flex-col gap-1">
+            <div class="flex justify-between items-center">
+              <span class="font-semibold text-on-surface">\${h.renterName || 'Unknown renter'}</span>
+              <span class="font-semibold text-primary">\${h.price ? h.price + ' THB' : 'No price logged'}</span>
             </div>
-            <div class="text-on-surface-variant">\${h.startDate || '-'} \u2192 \${h.endDate || '-'} (\${h.days || '?'} days)</div>
+            <div class="text-sm text-on-surface-variant">\${h.startDate || '-'} \u2192 \${h.endDate || '-'} &middot; \${h.days || '?'} days</div>
+            \${h.renterPhone ? \`<div class="text-sm text-on-surface-variant">\${h.renterPhone}</div>\` : ''}
           </div>\`).join('')
-        : '<div class="text-on-surface-variant text-sm mt-2">No rental history logged yet for this bike.</div>';
+        : '<div class="text-on-surface-variant text-sm py-8 text-center">No rental history logged yet for this bike.</div>';
 
       body.innerHTML = \`
-        <h3 class="font-headline-md text-headline-md font-semibold mb-1">\${b.model || b.bikeId}</h3>
-        <p class="font-label-caps text-label-caps text-on-surface-variant mb-3">\${b.bikeId}\${b.color ? ' • ' + b.color : ''}</p>
-        <div class="text-sm text-on-surface-variant mb-4">Location: \${b.location || '-'} &middot; Status: \${b.status || 'Available'}</div>
-        <h4 class="font-semibold text-sm mb-1">Rental History</h4>
-        \${historyRows}
+        <div class="p-6 border-b border-outline-variant flex justify-between items-start">
+          <div>
+            <h3 class="font-headline-lg text-headline-lg font-semibold text-on-surface">\${b.model || b.bikeId}</h3>
+            <p class="font-label-caps text-label-caps text-on-surface-variant mt-1">\${b.bikeId}\${b.color ? ' • ' + b.color : ''}</p>
+          </div>
+          <button id="close-modal-btn" class="text-on-surface-variant hover:text-on-surface p-1">
+            <span class="material-symbols-outlined">close</span>
+          </button>
+        </div>
+        <div class="p-6">
+          <div class="flex items-center gap-4 mb-6 text-sm">
+            <span class="px-3 py-1 rounded-full font-status-badge text-status-badge uppercase border \${badge}">\${b.status || 'Available'}</span>
+            <span class="text-on-surface-variant">Location: \${b.location || '-'}</span>
+          </div>
+          <h4 class="font-semibold text-on-surface mb-3">Rental History</h4>
+          <div class="flex flex-col gap-3">\${historyRows}</div>
+        </div>
       \`;
+      document.getElementById('close-modal-btn').addEventListener('click', () => modal.classList.add('hidden'));
     } catch (err) {
-      body.innerHTML = '<div class="text-error">Failed to load bike details</div>';
+      body.innerHTML = '<div class="p-6 text-error">Failed to load bike details</div>';
     }
   }
 
-  document.getElementById('close-modal-btn').addEventListener('click', () => {
-    document.getElementById('detail-modal').classList.add('hidden');
-  });
   document.getElementById('detail-modal').addEventListener('click', (e) => {
     if (e.target.id === 'detail-modal') document.getElementById('detail-modal').classList.add('hidden');
   });
