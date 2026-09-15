@@ -1485,6 +1485,7 @@ app.get('/motorbikes', (req, res) => {
 <h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Motorbike Inventory</h2>
 </header>
 <div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6">
+<div id="grid-view">
 <div class="flex flex-col md:flex-row gap-4 mb-6">
 <div class="relative flex-1">
 <span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline">search</span>
@@ -1500,12 +1501,14 @@ app.get('/motorbikes', (req, res) => {
 <div class="text-on-surface-variant">Loading fleet...</div>
 </div>
 </div>
-</main>
-<div id="detail-modal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 sm:p-8">
-  <div class="bg-surface-container-lowest rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-2xl">
-    <div id="modal-body">Loading...</div>
-  </div>
+<div id="history-view" class="hidden">
+<button id="back-to-grid-btn" class="flex items-center gap-2 text-primary font-label-caps text-label-caps mb-4 hover:underline">
+  <span class="material-symbols-outlined text-[18px]">arrow_back</span> Back to Motorbikes
+</button>
+<div id="history-body">Loading...</div>
 </div>
+</div>
+</main>
 <script>
   const TOKEN = ${JSON.stringify(token)};
   let ALL_BIKES = [];
@@ -1619,15 +1622,15 @@ app.get('/motorbikes', (req, res) => {
   });
 
   async function openHistoryModal(bikeId) {
-    const modal = document.getElementById('detail-modal');
-    const body = document.getElementById('modal-body');
-    body.innerHTML = '<div class="p-6 text-on-surface-variant">Loading...</div>';
-    modal.classList.remove('hidden');
+    document.getElementById('grid-view').classList.add('hidden');
+    document.getElementById('history-view').classList.remove('hidden');
+    const body = document.getElementById('history-body');
+    body.innerHTML = 'Loading...';
     try {
       const res = await fetch('/api/toh/motorbikes/' + encodeURIComponent(bikeId) + '/history' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
       const data = await res.json();
       if (data.error) {
-        body.innerHTML = '<div class="p-6 text-error">' + data.error + '</div>';
+        body.innerHTML = '<div class="text-error">' + data.error + '</div>';
         return;
       }
       const b = data.bike;
@@ -1636,7 +1639,7 @@ app.get('/motorbikes', (req, res) => {
 
       const historyRows = data.history.length
         ? data.history.map(h => \`
-          <div class="bg-surface-container-low rounded-xl p-4 flex flex-col gap-1">
+          <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col gap-1">
             <div class="flex justify-between items-center">
               <span class="font-semibold text-on-surface">\${h.renterName || 'Unknown renter'}</span>
               <span class="font-semibold text-primary">\${h.price ? h.price + ' THB' : 'No price logged'}</span>
@@ -1647,32 +1650,25 @@ app.get('/motorbikes', (req, res) => {
         : '<div class="text-on-surface-variant text-sm py-8 text-center">No rental history logged yet for this bike.</div>';
 
       body.innerHTML = \`
-        <div class="p-6 border-b border-outline-variant flex justify-between items-start">
-          <div>
-            <h3 class="font-headline-lg text-headline-lg font-semibold text-on-surface">\${b.model || b.bikeId}</h3>
-            <p class="font-label-caps text-label-caps text-on-surface-variant mt-1">\${b.bikeId}\${b.color ? ' • ' + b.color : ''}</p>
-          </div>
-          <button id="close-modal-btn" class="text-on-surface-variant hover:text-on-surface p-1">
-            <span class="material-symbols-outlined">close</span>
-          </button>
-        </div>
-        <div class="p-6">
-          <div class="flex items-center gap-4 mb-6 text-sm">
+        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6 mb-6">
+          <h3 class="font-headline-lg text-headline-lg font-semibold text-on-surface">\${b.model || b.bikeId}</h3>
+          <p class="font-label-caps text-label-caps text-on-surface-variant mt-1 mb-4">\${b.bikeId}\${b.color ? ' • ' + b.color : ''}</p>
+          <div class="flex items-center gap-4 text-sm">
             <span class="px-3 py-1 rounded-full font-status-badge text-status-badge uppercase border \${badge}">\${b.status || 'Available'}</span>
             <span class="text-on-surface-variant">Location: \${b.location || '-'}</span>
           </div>
-          <h4 class="font-semibold text-on-surface mb-3">Rental History</h4>
-          <div class="flex flex-col gap-3">\${historyRows}</div>
         </div>
+        <h4 class="font-semibold text-on-surface mb-3">Rental History</h4>
+        <div class="flex flex-col gap-3">\${historyRows}</div>
       \`;
-      document.getElementById('close-modal-btn').addEventListener('click', () => modal.classList.add('hidden'));
     } catch (err) {
-      body.innerHTML = '<div class="p-6 text-error">Failed to load bike details</div>';
+      body.innerHTML = '<div class="text-error">Failed to load bike details</div>';
     }
   }
 
-  document.getElementById('detail-modal').addEventListener('click', (e) => {
-    if (e.target.id === 'detail-modal') document.getElementById('detail-modal').classList.add('hidden');
+  document.getElementById('back-to-grid-btn').addEventListener('click', () => {
+    document.getElementById('history-view').classList.add('hidden');
+    document.getElementById('grid-view').classList.remove('hidden');
   });
 
   async function loadBikes() {
