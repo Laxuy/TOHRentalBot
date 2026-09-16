@@ -140,14 +140,47 @@ function fallbackResult(reason) {
 }
 
 /**
+ * Builds a human-readable summary of what was detected and what is
+ * missing from the extracted contract data, for use in AI Task Queue
+ * descriptions so staff know exactly what needs their attention.
+ */
+function describeExtraction(extracted) {
+  const found = [];
+  const missing = [];
+  const fields = [
+    { key: 'plate', label: 'Plate' },
+    { key: 'renterName', label: 'Renter name' },
+    { key: 'renterPhone', label: 'Renter phone' },
+    { key: 'rentedDate', label: 'Rented date' },
+    { key: 'expectedReturn', label: 'Expected return' },
+    { key: 'price', label: 'Price' },
+  ];
+  fields.forEach(({ key, label }) => {
+    const val = extracted[key];
+    if (val != null && val !== '') {
+      found.push(`${label}: ${val}`);
+    } else {
+      missing.push(label);
+    }
+  });
+  let desc = `Confidence: ${extracted.confidence}`;
+  if (found.length) desc += '\nDetected: ' + found.join(', ');
+  if (missing.length) desc += '\nMissing: ' + missing.join(', ');
+  if (extracted.error) desc += '\nError: ' + extracted.error;
+  return desc;
+}
+
+/**
  * Decides whether extracted data is trustworthy enough to auto-fill,
  * or should be flagged to staff for manual entry instead.
  *
- * Use this as the gate before writing to the Fleet Tracker sheet.
+ * Requires HIGH confidence AND at minimum a plate + renter name.
+ * Medium-confidence extractions go to the AI Task Queue for staff review
+ * rather than silently auto-filling potentially wrong data.
  */
 function shouldAutoFill(extracted) {
   if (!extracted || extracted.error) return false;
-  if (extracted.confidence === "low") return false;
+  if (extracted.confidence !== "high") return false;
   // Require at minimum a plate + renter name to auto-fill anything
   return Boolean(extracted.plate && extracted.renterName);
 }
@@ -155,4 +188,5 @@ function shouldAutoFill(extracted) {
 module.exports = {
   extractContractData,
   shouldAutoFill,
+  describeExtraction,
 };
