@@ -446,7 +446,7 @@ async function logRentalHistory(entry, sheetId) {
 }
 
 // Returns every logged history entry for one specific bike, most recent first.
-async function getRentalHistoryForBike(bikeId, sheetId) {
+async function getAllRentalHistory(sheetId) {
   try {
     const sheets = google.sheets({ version: 'v4', auth });
     const res = await sheets.spreadsheets.values.get({
@@ -455,7 +455,6 @@ async function getRentalHistoryForBike(bikeId, sheetId) {
     });
     const rows = res.data.values || [];
     return rows
-      .filter(row => (row[1] || '').trim().toLowerCase() === bikeId.trim().toLowerCase())
       .map(row => ({
         dateLogged: row[0] || '',
         bikeId: row[1] || '',
@@ -474,6 +473,11 @@ async function getRentalHistoryForBike(bikeId, sheetId) {
     console.error('Rental history read error (treated as empty):', err.message);
     return [];
   }
+}
+
+async function getRentalHistoryForBike(bikeId, sheetId) {
+  const all = await getAllRentalHistory(sheetId);
+  return all.filter(h => h.bikeId.trim().toLowerCase() === bikeId.trim().toLowerCase());
 }
 
 async function findBikeRow(plateQuery, fleetSheetId = FLEET_SHEET_ID) {
@@ -1495,6 +1499,10 @@ app.get('/motorbikes', (req, res) => {
 <span class="material-symbols-outlined">fact_check</span>
 <span class="font-label-caps text-label-caps">Data Quality</span>
 </a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rental-history?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">history</span>
+<span class="font-label-caps text-label-caps">Rental History</span>
+</a>
 </nav>
 </aside>
 <main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
@@ -1911,6 +1919,10 @@ app.get('/rentals', (req, res) => {
 <span class="material-symbols-outlined">fact_check</span>
 <span class="font-label-caps text-label-caps">Data Quality</span>
 </a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rental-history?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">history</span>
+<span class="font-label-caps text-label-caps">Rental History</span>
+</a>
 </nav>
 </aside>
 <main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
@@ -2069,6 +2081,10 @@ app.get('/overview', (req, res) => {
 <span class="material-symbols-outlined">fact_check</span>
 <span class="font-label-caps text-label-caps">Data Quality</span>
 </a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rental-history?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">history</span>
+<span class="font-label-caps text-label-caps">Rental History</span>
+</a>
 </nav>
 </aside>
 <main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
@@ -2220,6 +2236,10 @@ app.get('/ai-tasks', (req, res) => {
 <span class="material-symbols-outlined">fact_check</span>
 <span class="font-label-caps text-label-caps">Data Quality</span>
 </a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rental-history?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">history</span>
+<span class="font-label-caps text-label-caps">Rental History</span>
+</a>
 </nav>
 </aside>
 <main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
@@ -2360,6 +2380,187 @@ app.get('/api/:shopId/data-quality', async (req, res) => {
   }
 });
 
+// Returns every logged rental across all bikes for the shop, most recent
+// first — used by the /rental-history page.
+app.get('/api/:shopId/rental-history', async (req, res) => {
+  try {
+    const auth = checkDashboardAuth(req);
+    if (!auth.ok) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const shop = getShop(req.params.shopId);
+    const history = await getAllRentalHistory(shop.fleetSheetId);
+    res.json({ shop: shop.name, history, updatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error('Rental history API error:', err.message);
+    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+app.get('/rental-history', (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) {
+    return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  }
+  const token = req.query.token || '';
+  res.send(`<!DOCTYPE html><html class="light" lang="en"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>Rental History - TOH Rental</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com" rel="preconnect">
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
+<script id="tailwind-config">
+  tailwind.config = {
+    darkMode: "class",
+    theme: { extend: {
+      "colors": {
+        "outline-variant": "#c1c6d7", "background": "#faf8ff", "surface-container": "#eaedff",
+        "primary-container": "#0070eb", "surface-bright": "#faf8ff", "on-surface-variant": "#414755",
+        "surface-container-low": "#f2f3ff", "on-background": "#131b2e", "surface-container-lowest": "#ffffff",
+        "outline": "#717786", "secondary-container": "#d5e3fd", "on-surface": "#131b2e",
+        "surface": "#faf8ff", "surface-tint": "#005bc1", "secondary": "#515f74",
+        "surface-container-high": "#e2e7ff", "surface-container-highest": "#dae2fd",
+        "primary": "#0058bc", "on-primary": "#ffffff", "on-primary-container": "#fefcff",
+        "on-secondary-container": "#57657b", "error": "#ba1a1a"
+      },
+      "borderRadius": { "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem" },
+      "spacing": { "gutter": "16px", "md": "16px", "xs": "8px", "base": "4px", "margin-mobile": "16px", "margin-desktop": "32px", "sm": "12px", "xl": "32px", "lg": "24px" },
+      "fontFamily": { "status-badge": ["Inter"], "headline-md": ["Inter"], "body-md": ["Inter"], "body-lg": ["Inter"], "label-caps": ["JetBrains Mono"], "headline-lg": ["Inter"] },
+      "fontSize": {
+        "status-badge": ["12px", { "lineHeight": "12px", "fontWeight": "700" }],
+        "headline-md": ["20px", { "lineHeight": "28px", "fontWeight": "600" }],
+        "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
+        "label-caps": ["12px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600" }],
+        "headline-lg": ["24px", { "lineHeight": "32px", "fontWeight": "600" }]
+      }
+    } }
+  }
+</script>
+<style>
+  .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  body { min-height: max(884px, 100dvh); }
+</style>
+</head>
+<body class="bg-surface text-on-surface font-body-md min-h-screen flex flex-col md:flex-row">
+<header class="flex justify-between items-center w-full px-margin-mobile h-16 z-50 bg-surface border-b border-outline-variant md:hidden sticky top-0">
+<h1 class="font-headline-lg text-headline-lg font-bold text-primary tracking-tight">TOH Rental</h1>
+</header>
+<aside class="hidden md:flex flex-col h-full py-lg gap-xs bg-surface border-r border-outline-variant fixed left-0 top-0 w-[280px] z-40 overflow-y-auto no-scrollbar">
+<div class="px-4 mb-6">
+<h1 class="font-headline-md text-headline-md text-primary mb-6">TOH Rental</h1>
+</div>
+<nav class="flex flex-col gap-2">
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/overview?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">dashboard</span>
+<span class="font-label-caps text-label-caps">Overview</span>
+</a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/motorbikes?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">two_wheeler</span>
+<span class="font-label-caps text-label-caps">Motorbikes</span>
+</a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rentals?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">receipt_long</span>
+<span class="font-label-caps text-label-caps">Rentals</span>
+</a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/ai-tasks?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">smart_toy</span>
+<span class="font-label-caps text-label-caps">AI Tasks</span>
+</a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/data-quality?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">fact_check</span>
+<span class="font-label-caps text-label-caps">Data Quality</span>
+</a>
+<a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
+<span class="material-symbols-outlined">history</span>
+<span class="font-label-caps text-label-caps">Rental History</span>
+</a>
+</nav>
+</aside>
+<main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
+<header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0">
+<h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Rental History</h2>
+</header>
+<div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6">
+<div class="relative">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline">search</span>
+<input id="search-input" class="w-full pl-10 pr-4 py-3 bg-surface-container-lowest border border-outline-variant rounded-xl focus:outline-none focus:ring-2 focus:ring-primary font-body-md text-body-md" placeholder="Search by renter, phone, or bike..." type="text">
+</div>
+<div id="history-list" class="flex flex-col gap-3">
+<div class="text-on-surface-variant">Loading rental history...</div>
+</div>
+</div>
+</main>
+<script>
+  const TOKEN = ${JSON.stringify(token)};
+  let ALL_HISTORY = [];
+
+  function historyCard(h) {
+    return \`<article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6">
+      <div class="w-10 h-10 rounded bg-surface-container flex items-center justify-center shrink-0 text-on-surface-variant">
+        <span class="material-symbols-outlined text-[20px]">two_wheeler</span>
+      </div>
+      <div class="flex-1 grid grid-cols-1 sm:grid-cols-4 gap-2 sm:gap-4">
+        <div>
+          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Renter</p>
+          <p class="font-body-md text-on-surface font-semibold">\${h.renterName || 'Unknown'}</p>
+          <p class="font-body-md text-on-surface-variant text-sm">\${h.renterPhone || '-'}</p>
+        </div>
+        <div>
+          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Bike</p>
+          <p class="font-body-md text-on-surface">\${h.model || h.bikeId || '-'}</p>
+          <p class="font-body-md text-on-surface-variant text-sm">\${h.bikeId || ''}</p>
+        </div>
+        <div>
+          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Dates</p>
+          <p class="font-body-md text-on-surface">\${h.startDate || '-'} \u2192 \${h.endDate || '-'}</p>
+          <p class="font-body-md text-on-surface-variant text-sm">\${h.days || '?'} days</p>
+        </div>
+        <div>
+          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Price</p>
+          <p class="font-body-md text-on-surface font-semibold">\${h.price ? h.price + ' THB' : '-'}</p>
+          <p class="font-body-md text-on-surface-variant text-sm">\${h.loggedBy || ''}</p>
+        </div>
+      </div>
+    </article>\`;
+  }
+
+  function renderHistory() {
+    const list = document.getElementById('history-list');
+    const query = document.getElementById('search-input').value.trim().toLowerCase();
+    let filtered = ALL_HISTORY;
+    if (query) {
+      filtered = ALL_HISTORY.filter(h => \`\${h.renterName} \${h.renterPhone} \${h.bikeId} \${h.model}\`.toLowerCase().includes(query));
+    }
+    list.innerHTML = filtered.length ? filtered.map(historyCard).join('') : '<div class="text-on-surface-variant">No rental history yet.</div>';
+  }
+
+  document.getElementById('search-input').addEventListener('input', renderHistory);
+
+  async function loadHistory() {
+    try {
+      const res = await fetch('/api/toh/rental-history' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
+      const data = await res.json();
+      if (data.error) {
+        document.getElementById('history-list').innerHTML = '<div class="text-error">' + data.error + '</div>';
+        return;
+      }
+      ALL_HISTORY = data.history;
+      renderHistory();
+    } catch (err) {
+      document.getElementById('history-list').innerHTML = '<div class="text-error">Failed to load rental history</div>';
+    }
+  }
+  loadHistory();
+</script>
+</body></html>`);
+});
+
 app.get('/data-quality', (req, res) => {
   const auth = checkDashboardAuth(req);
   if (!auth.ok) {
@@ -2437,6 +2638,10 @@ app.get('/data-quality', (req, res) => {
 <a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
 <span class="material-symbols-outlined">fact_check</span>
 <span class="font-label-caps text-label-caps">Data Quality</span>
+</a>
+<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rental-history?token=${encodeURIComponent(token)}">
+<span class="material-symbols-outlined">history</span>
+<span class="font-label-caps text-label-caps">Rental History</span>
 </a>
 </nav>
 </aside>
