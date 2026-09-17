@@ -811,6 +811,110 @@ app.get('/api/:shopId/rental-history', async (req, res) => {
   }
 });
 
+app.get('/api/:shopId/staff', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    getShop(req.params.shopId);
+    const staff = db.getAllStaff();
+    res.json({ staff });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/:shopId/staff', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    getShop(req.params.shopId);
+    const { name, phone, role, shiftStart, shiftEnd } = req.body || {};
+    if (!name || !role) return res.status(400).json({ error: 'name and role are required' });
+    const result = db.addStaff({ name, phone, role, shiftStart, shiftEnd });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/:shopId/staff/:staffId', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    getShop(req.params.shopId);
+    const result = db.removeStaff(req.params.staffId);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/:shopId/staff/:staffId/checkin', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    getShop(req.params.shopId);
+    const result = db.checkInStaff(req.params.staffId);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/:shopId/staff/:staffId/checkout', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    getShop(req.params.shopId);
+    const result = db.checkOutStaff(req.params.staffId);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/:shopId/staff/:staffId/leave', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    getShop(req.params.shopId);
+    const result = db.setStaffLeave(req.params.staffId);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/:shopId/staff/:staffId/shift', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    getShop(req.params.shopId);
+    const { shiftStart, shiftEnd } = req.body || {};
+    const result = db.updateStaffShift(req.params.staffId, shiftStart, shiftEnd, auth.user);
+    if (result.ok && result.staff && result.staff.phone) {
+      sendWhatsApp(result.staff.phone, `Hi ${result.staff.name}, your shift has been updated to ${shiftStart} - ${shiftEnd}.`)
+        .catch(err => console.error('Shift notify failed:', err.message));
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/:shopId/staff/:staffId/hours', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    getShop(req.params.shopId);
+    const { todayHours, weekHours } = req.body || {};
+    const result = db.editStaffHours(req.params.staffId, todayHours, weekHours, auth.user);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 function dashboardShell(token, title, bodyAttrs, bodyHTML) {
   const active = page =>
     title.includes(page)
@@ -837,6 +941,7 @@ function dashboardShell(token, title, bodyAttrs, bodyHTML) {
     '<a class="flex items-center gap-4' + active('AI Task') + ' px-4 py-3 mx-2" href="/ai-tasks?token=' + t + '"><span class="material-symbols-outlined">smart_toy</span><span class="font-label-caps text-label-caps">AI Tasks</span></a>' +
     '<a class="flex items-center gap-4' + active('Data Quality') + ' px-4 py-3 mx-2" href="/data-quality?token=' + t + '"><span class="material-symbols-outlined">verified</span><span class="font-label-caps text-label-caps">Data Quality</span></a>' +
     '<a class="flex items-center gap-4' + active('Rental History') + ' px-4 py-3 mx-2" href="/rental-history?token=' + t + '"><span class="material-symbols-outlined">history</span><span class="font-label-caps text-label-caps">Rental History</span></a>' +
+    '<a class="flex items-center gap-4' + active('Staff') + ' px-4 py-3 mx-2" href="/staff?token=' + t + '"><span class="material-symbols-outlined">badge</span><span class="font-label-caps text-label-caps">Staff</span></a>' +
     '</nav></aside>' + bodyHTML + '</body></html>';
 }
 
@@ -885,6 +990,34 @@ app.get('/rental-history', (req, res) => {
   if (!auth.ok) return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
   const token = req.query.token || '';
   res.send(dashboardShell(token, 'Rental History', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Rental History</h2><div class="flex items-center gap-3"><input id="searchInput" class="text-sm border border-outline-variant rounded-lg px-3 py-1.5 bg-surface w-[200px]" placeholder="Search plate or name..." oninput="renderHistory()"></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-3"><div id="count" class="text-sm text-on-surface-variant"></div><div id="historyList" class="space-y-3"></div></div></main><script>var TOKEN=' + JSON.stringify(token) + ';var allHistory=[];async function loadHistory(){try{var res=await fetch("/api/toh/rental-history"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var data=await res.json();if(data.error){document.getElementById("historyList").innerHTML="<div class=\\"text-error\\">"+data.error+"</div>";return;}allHistory=data.history||[];renderHistory();}catch(err){document.getElementById("historyList").innerHTML="<div class=\\"text-error\\">Failed to load</div>";}}function renderHistory(){var q=(document.getElementById("searchInput").value||"").toLowerCase();var items=q?allHistory.filter(function(h){return (h.bike_id||"").toLowerCase().indexOf(q)>=0||(h.renter_name||"").toLowerCase().indexOf(q)>=0;}):allHistory;document.getElementById("count").textContent=items.length+" rental"+(items.length!==1?"s":"")+" logged";document.getElementById("historyList").innerHTML=items.length?items.map(function(h){return "<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-wrap items-center gap-3\\"><div class=\\"font-label-caps text-primary font-bold min-w-[50px]\\">"+(h.bike_id||"-")+"</div><div class=\\"flex-1 min-w-0\\"><div class=\\"font-semibold text-sm\\">"+(h.renter_name||"-")+"</div><div class=\\"text-xs text-on-surface-variant\\">"+(h.start_date||"")+" -> "+(h.end_date||"")+(h.days?" · "+h.days+" days":"")+"</div></div><div class=\\"flex items-center gap-3 ml-auto\\"><div class=\\"text-sm font-semibold font-label-caps\\">"+(h.price?h.price+" THB":"-")+"</div><div class=\\"text-xs text-on-surface-variant\\">"+(h.date_logged||"")+"</div></div></div>";}).join(""):"<div class=\\"text-on-surface-variant text-sm text-center py-12\\">No rental history yet</div>";}loadHistory();setInterval(loadHistory,120000);</script>'));
+});
+
+app.get('/staff', (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  const token = req.query.token || '';
+  res.send(dashboardShell(token, 'Staff', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Staff</h2><div class="flex items-center gap-3"><span id="countBadge" class="text-sm text-on-surface-variant"></span><button id="adminToggle" class="text-xs px-3 py-2 rounded-lg font-status-badge bg-surface-container-high hover:opacity-80" onclick="toggleAdmin()">Admin mode: Off</button><button id="addBtn" class="text-xs px-3 py-2 rounded-lg font-status-badge bg-primary text-on-primary hover:opacity-90" style="display:none" onclick="openAddModal()">+ Add Staff</button></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6"><div><h3 class="font-headline-md text-headline-md mb-3">Boss</h3><div id="bossGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div></div><div><h3 class="font-headline-md text-headline-md mb-3">Staff</h3><div id="staffGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div></div></div></main>' +
+  '<div id="addModal" class="fixed inset-0 bg-black/40 items-center justify-center z-50" style="display:none"><div class="bg-surface-container-lowest rounded-xl p-6 w-[300px]"><h3 class="font-headline-md text-headline-md mb-4">Add Staff</h3><input id="newName" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface" placeholder="Name"><input id="newPhone" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface" placeholder="Phone (with country code)"><select id="newRole" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface"><option value="staff">Staff</option><option value="boss">Boss</option></select><div class="flex gap-2 mb-3"><input id="newShiftStart" type="time" value="08:00" class="flex-1 border border-outline-variant rounded-lg px-2 py-2 text-sm bg-surface"><input id="newShiftEnd" type="time" value="18:00" class="flex-1 border border-outline-variant rounded-lg px-2 py-2 text-sm bg-surface"></div><div class="flex gap-2 justify-end"><button class="text-xs px-3 py-2 rounded-lg bg-surface-container-high" onclick="closeAddModal()">Cancel</button><button class="text-xs px-3 py-2 rounded-lg bg-primary text-on-primary" onclick="confirmAdd()">Add</button></div></div></div>' +
+  '<div id="editModal" class="fixed inset-0 bg-black/40 items-center justify-center z-50" style="display:none"><div class="bg-surface-container-lowest rounded-xl p-6 w-[300px]"><h3 id="editTitle" class="font-headline-md text-headline-md mb-4">Edit</h3><label class="text-xs text-on-surface-variant">Shift start</label><input id="editStart" type="time" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface"><label class="text-xs text-on-surface-variant">Shift end</label><input id="editEnd" type="time" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface"><label class="text-xs text-on-surface-variant">Today hours</label><input id="editToday" type="number" step="0.1" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface"><label class="text-xs text-on-surface-variant">Week hours</label><input id="editWeek" type="number" step="0.1" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-3 text-sm bg-surface"><div class="flex gap-2 justify-end"><button class="text-xs px-3 py-2 rounded-lg bg-surface-container-high" onclick="closeEditModal()">Cancel</button><button class="text-xs px-3 py-2 rounded-lg bg-primary text-on-primary" onclick="confirmEdit()">Save</button></div></div></div>' +
+  '<script>var TOKEN=' + JSON.stringify(token) + ';var adminMode=false;var allStaff=[];var editingId=null;' +
+  'function qs(p){return "/api/toh/"+p+(TOKEN?(p.indexOf("?")>=0?"&":"?")+"token="+encodeURIComponent(TOKEN):"");}' +
+  'function toggleAdmin(){adminMode=!adminMode;document.getElementById("adminToggle").textContent="Admin mode: "+(adminMode?"On":"Off");document.getElementById("addBtn").style.display=adminMode?"inline-block":"none";render();}' +
+  'function openAddModal(){document.getElementById("addModal").style.display="flex";}' +
+  'function closeAddModal(){document.getElementById("addModal").style.display="none";}' +
+  'function openEditModal(id){editingId=id;var s=allStaff.find(function(x){return x.id==id;});document.getElementById("editTitle").textContent="Edit - "+s.name;document.getElementById("editStart").value=s.shift_start;document.getElementById("editEnd").value=s.shift_end;document.getElementById("editToday").value=s.today_hours;document.getElementById("editWeek").value=s.week_hours;document.getElementById("editModal").style.display="flex";}' +
+  'function closeEditModal(){document.getElementById("editModal").style.display="none";}' +
+  'async function confirmAdd(){var name=document.getElementById("newName").value.trim();if(!name)return;var body={name:name,phone:document.getElementById("newPhone").value.trim(),role:document.getElementById("newRole").value,shiftStart:document.getElementById("newShiftStart").value,shiftEnd:document.getElementById("newShiftEnd").value};await fetch(qs("staff"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});closeAddModal();document.getElementById("newName").value="";load();}' +
+  'async function confirmEdit(){var shiftStart=document.getElementById("editStart").value,shiftEnd=document.getElementById("editEnd").value,todayHours=parseFloat(document.getElementById("editToday").value)||0,weekHours=parseFloat(document.getElementById("editWeek").value)||0;await fetch(qs("staff/"+editingId+"/shift"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({shiftStart:shiftStart,shiftEnd:shiftEnd})});await fetch(qs("staff/"+editingId+"/hours"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({todayHours:todayHours,weekHours:weekHours})});closeEditModal();load();}' +
+  'async function removeStaffRow(id){if(!confirm("Remove this staff member?"))return;await fetch(qs("staff/"+id),{method:"DELETE"});load();}' +
+  'async function checkIn(id){await fetch(qs("staff/"+id+"/checkin"),{method:"POST"});load();}' +
+  'async function checkOut(id){await fetch(qs("staff/"+id+"/checkout"),{method:"POST"});load();}' +
+  'async function setLeave(id){await fetch(qs("staff/"+id+"/leave"),{method:"POST"});load();}' +
+  'function statusLabel(s){return s==="active"?"Active":s==="leave"?"Medical Leave":"Inactive";}' +
+  'function statusPill(s){return s==="active"?"pill-available":s==="leave"?"pill-maintenance":"pill-done";}' +
+  'function card(s){var isBoss=s.role==="boss";var late=s.check_in_at&&s.check_in_at>s.shift_start&&s.status==="active";var html="<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4 relative\\">";if(adminMode){html+="<button onclick=\\"removeStaffRow("+s.id+")\\" class=\\"absolute top-3 right-3 text-on-surface-variant hover:text-error\\">&times;</button>";}html+="<div class=\\"flex justify-between items-start mb-2\\"><div class=\\"font-semibold text-sm\\">"+s.name+"</div><span class=\\"text-xs px-2 py-1 rounded-full font-status-badge "+(isBoss?"pill-reserved":"pill-active")+"\\">"+s.role+"</span></div>";if(!isBoss){html+="<div class=\\"text-xs text-on-surface-variant font-label-caps mb-2\\">Shift "+s.shift_start+" - "+s.shift_end+(adminMode?" <button onclick=\\"openEditModal("+s.id+")\\" class=\\"text-primary\\">&#9998;</button>":"")+"</div>";html+="<div class=\\"text-xs text-on-surface-variant mb-1\\">Today: "+s.today_hours+"h &middot; Week: "+s.week_hours+"h</div>";}html+="<span class=\\"text-xs px-2 py-1 rounded-full font-status-badge "+statusPill(s.status)+"\\">"+statusLabel(s.status)+"</span>";if(late){html+="<div class=\\"text-xs text-error mt-1\\">Late check-in ("+s.check_in_at+")</div>";}if(!isBoss){html+="<div class=\\"flex gap-2 flex-wrap mt-3\\"><button onclick=\\"checkIn("+s.id+")\\" class=\\"text-xs px-2 py-1 rounded-lg bg-surface-container-high\\">Check In</button><button onclick=\\"checkOut("+s.id+")\\" class=\\"text-xs px-2 py-1 rounded-lg bg-surface-container-high\\">Check Out</button><button onclick=\\"setLeave("+s.id+")\\" class=\\"text-xs px-2 py-1 rounded-lg pill-maintenance\\">Leave</button></div>";}html+="</div>";return html;}' +
+  'async function load(){try{var res=await fetch(qs("staff"));var data=await res.json();allStaff=data.staff||[];render();}catch(e){}}' +
+  'function render(){var boss=allStaff.filter(function(s){return s.role==="boss";});var staff=allStaff.filter(function(s){return s.role==="staff";});document.getElementById("countBadge").textContent=allStaff.length+" total, "+staff.length+" staff, "+boss.length+" boss";document.getElementById("bossGrid").innerHTML=boss.map(card).join("")||"<div class=\\"text-sm text-on-surface-variant\\">No boss added</div>";document.getElementById("staffGrid").innerHTML=staff.map(card).join("")||"<div class=\\"text-sm text-on-surface-variant\\">No staff added</div>";}' +
+  'load();setInterval(load,30000);</script>'));
 });
 
 app.listen(3000, () => console.log('TOH Rental Bot running on port 3000'));
