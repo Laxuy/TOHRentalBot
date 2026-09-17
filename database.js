@@ -98,6 +98,31 @@ function createTables() {
       mime_type TEXT DEFAULT 'image/jpeg',
       created_at TEXT DEFAULT (datetime('now','localtime'))
     );
+
+    CREATE TABLE IF NOT EXISTS staff (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      phone TEXT DEFAULT '',
+      role TEXT NOT NULL CHECK(role IN ('staff','boss')),
+      shift_start TEXT DEFAULT '08:00',
+      shift_end TEXT DEFAULT '18:00',
+      status TEXT DEFAULT 'inactive' CHECK(status IN ('active','inactive','leave')),
+      check_in_at TEXT DEFAULT '',
+      today_hours REAL DEFAULT 0,
+      week_hours REAL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now','localtime')),
+      updated_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS staff_edits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      staff_id INTEGER NOT NULL,
+      field TEXT NOT NULL,
+      old_value TEXT,
+      new_value TEXT,
+      edited_by TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
   `);
 }
 
@@ -344,6 +369,90 @@ function getDashboardStats() {
   };
 }
 
+// ─── Staff ──────────────────────────────────────────────────
+
+function getAllStaff() {
+  const db = getDb();
+  return db.prepare('SELECT * FROM staff ORDER BY role DESC, name').all();
+}
+
+function getStaffById(id) {
+  const db = getDb();
+  return db.prepare('SELECT * FROM staff WHERE id = ?').get(id);
+}
+
+function addStaff({ name, phone, role, shiftStart, shiftEnd }) {
+  const db = getDb();
+  const info = db.prepare(`
+    INSERT INTO staff (name, phone, role, shift_start, shift_end, status)
+    VALUES (?, ?, ?, ?, ?, 'inactive')
+  `).run(name, phone || '', role, shiftStart || '08:00', shiftEnd || '18:00');
+  return { ok: true, id: info.lastInsertRowid };
+}
+
+function removeStaff(id) {
+  const db = getDb();
+  db.prepare('DELETE FROM staff WHERE id = ?').run(id);
+  return { ok: true };
+}
+
+function checkInStaff(id) {
+  const db = getDb();
+  const staff = getStaffById(id);
+  if (!staff) return { ok: false, message: 'Staff not found' };
+  const now = new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
+  db.prepare(`UPDATE staff SET status='active', check_in_at=?, updated_at=datetime('now','localtime') WHERE id=?`).run(now, id);
+  const late = now > staff.shift_start;
+  return { ok: true, checkIn: now, late };
+}
+
+function checkOutStaff(id) {
+  const db = getDb();
+  const staff = getStaffById(id);
+  if (!staff) return { ok: false, message: 'Staff not found' };
+  let hoursToday = 0;
+  if (staff.check_in_at) {
+    const [h1, m1] = staff.check_in_at.split(':').map(Number);
+    const now = new Date();
+    const start = new Date(); start.setHours(h1, m1, 0, 0);
+    hoursToday = Math.max(0, Math.round(((now - start) / 3600000) * 10) / 10);
+  }
+  const newWeekHours = Math.round((staff.week_hours + hoursToday) * 10) / 10;
+  db.prepare(`
+    UPDATE staff SET status='inactive', check_in_at='', today_hours=0, week_hours=?, updated_at=datetime('now','localtime')
+    WHERE id=?
+  `).run(newWeekHours, id);
+  return { ok: true, hoursToday, weekHours: newWeekHours };
+}
+
+function setStaffLeave(id) {
+  const db = getDb();
+  db.prepare(`UPDATE staff SET status='leave', check_in_at='', updated_at=datetime('now','localtime') WHERE id=?`).run(id);
+  return { ok: true };
+}
+
+function updateStaffShift(id, shiftStart, shiftEnd, editedBy) {
+  const db = getDb();
+  const staff = getStaffById(id);
+  if (!staff) return { ok: false, message: 'Staff not found' };
+  db.prepare(`UPDATE staff SET shift_start=?, shift_end=?, updated_at=datetime('now','localtime') WHERE id=?`)
+    .run(shiftStart, shiftEnd, id);
+  db.prepare(`INSERT INTO staff_edits (staff_id, field, old_value, new_value, edited_by) VALUES (?, 'shift', ?, ?, ?)`)
+    .run(id, `${staff.shift_start}-${staff.shift_end}`, `${shiftStart}-${shiftEnd}`, editedBy || '');
+  return { ok: true, staff: getStaffById(id) };
+}
+
+function editStaffHours(id, todayHours, weekHours, editedBy) {
+  const db = getDb();
+  const staff = getStaffById(id);
+  if (!staff) return { ok: false, message: 'Staff not found' };
+  db.prepare(`UPDATE staff SET today_hours=?, week_hours=?, updated_at=datetime('now','localtime') WHERE id=?`)
+    .run(todayHours, weekHours, id);
+  db.prepare(`INSERT INTO staff_edits (staff_id, field, old_value, new_value, edited_by) VALUES (?, 'hours', ?, ?, ?)`)
+    .run(id, `${staff.today_hours}/${staff.week_hours}`, `${todayHours}/${weekHours}`, editedBy || '');
+  return { ok: true };
+}
+
 module.exports = {
   getDb,
   // motorbikes
@@ -376,4 +485,14 @@ module.exports = {
   getRecentPhotos,
   // dashboard
   getDashboardStats,
+  // staff
+  getAllStaff,
+  getStaffById,
+  addStaff,
+  removeStaff,
+  checkInStaff,
+  checkOutStaff,
+  setStaffLeave,
+  updateStaffShift,
+  editStaffHours,
 };
