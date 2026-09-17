@@ -1,8 +1,8 @@
 const express = require('express');
 const axios = require('axios');
-const { google } = require('googleapis');
-const { extractContractData, shouldAutoFill } = require('./contractExtractor');
+const { extractContractData, shouldAutoFill, describeExtraction } = require('./contractExtractor');
 const { getShop } = require('./config/shops');
+const db = require('./database');
 require('dotenv').config();
 const app = express();
 app.use(express.json());
@@ -17,9 +17,6 @@ const STAFF_NUMBERS = (process.env.STAFF_NUMBERS || '66950615202')
   .map(n => n.trim())
   .filter(Boolean);
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const SHEET_ID = process.env.SHEET_ID;
-const FLEET_SHEET_ID = process.env.FLEET_SHEET_ID || '1XvSdL_oQvEZccji43kg-2C7BQgZLXi3Don2y-lZicuY';
-const CONTRACTS_FOLDER_ID = process.env.CONTRACTS_FOLDER_ID || '1r3YhaWFQl7hk2Y5WJY6rdPt3cLlLGIQ_';
 const MY_NUMBER = process.env.MY_NUMBER;
 // Optional: set DASHBOARD_TOKEN in Railway env vars to require ?token=... on /dashboard.
 // Leave unset during testing; set it before sharing the URL anywhere.
@@ -42,105 +39,17 @@ function checkDashboardAuth(req) {
 const conversations = {};
 const processedMessages = new Set();
 
-const auth = new google.auth.GoogleAuth({
-  credentials: {
-    client_email: process.env.GOOGLE_CLIENT_EMAIL,
-    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-  },
-  scopes: [
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive.file',
-  ],
-});
-
 function clean(str) {
   if (!str) return '';
   return str.replace(/\*\*/g, '').replace(/\*/g, '').trim();
 }
 
-async function ensureHeader() {
-  try {
-    const sheets = google.sheets({ version: 'v4', auth });
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: 'Sheet1!A1:I1',
-    });
-    const firstRow = res.data.values?.[0];
-    if (!firstRow || firstRow[0] !== 'Date') {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID,
-        range: 'Sheet1!A1:I1',
-        valueInputOption: 'USER_ENTERED',
-        resource: {
-          values: [['Date', 'Customer Name', 'Phone Number', 'Bike Type', 'Start Date', 'End Date', 'Pickup Location', 'Price', 'Source']]
-        }
-      });
-    }
-  } catch (err) {
-    console.error('Header error:', err.message);
-  }
-}
-
 async function appendToSheet(data) {
   try {
-    await ensureHeader();
-    const sheets = google.sheets({ version: 'v4', auth });
-    const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SHEET_ID,
-      range: 'Sheet1!A:I',
-      valueInputOption: 'USER_ENTERED',
-      resource: {
-        values: [[
-          now,
-          clean(data.name),
-          clean(data.phone),
-          clean(data.bike),
-          clean(data.startDate),
-          clean(data.endDate),
-          clean(data.location),
-          clean(data.price),
-          'WhatsApp Bot'
-        ]]
-      }
-    });
-    console.log('Booking logged to Google Sheets');
+    db.appendBooking(data);
+    console.log('Booking saved to database');
   } catch (err) {
-    console.error('Sheets error:', err.message);
-  }
-}
-
-async function ensureFinanceHeader() {
-  try {
-    const sheets = google.sheets({ version: 'v4', auth });
-    const meta = await sheets.spreadsheets.get({
-      spreadsheetId: SHEET_ID,
-      fields: 'sheets.properties.title',
-    });
-    const titles = (meta.data.sheets || []).map(s => s.properties.title);
-    if (!titles.includes('Finance')) {
-      await sheets.spreadsheets.batchUpdate({
-        spreadsheetId: SHEET_ID,
-        resource: { requests: [{ addSheet: { properties: { title: 'Finance' } } }] },
-      });
-    }
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: 'Finance!A1:F1',
-    });
-    const firstRow = res.data.values?.[0];
-    if (!firstRow || firstRow[0] !== 'Date') {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID,
-        range: 'Finance!A1:F1',
-        valueInputOption: 'USER_ENTERED',
-        resource: {
-          values: [['Date', 'Type', 'Bike', 'Amount (THB)', 'Description', 'Reported By']]
-        }
-      });
-    }
-  } catch (err) {
-    console.error('Finance header error:', err.message);
+    console.error('Booking save error:', err.message);
   }
 }
 
@@ -166,73 +75,16 @@ function parseCleanPrice(str) {
 
 async function logFinance(type, bike, amount, description, reportedBy) {
   try {
-    await ensureFinanceHeader();
-    const sheets = google.sheets({ version: 'v4', auth });
-    const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SHEET_ID,
-      range: 'Finance!A:F',
-      valueInputOption: 'USER_ENTERED',
-      resource: {
-        values: [[now, type, bike || '-', amount, description || '-', reportedBy || 'WhatsApp Bot']]
-      }
-    });
-    console.log(`${type} logged to Finance sheet`);
+    db.logFinance(type, bike, amount, description, reportedBy);
+    console.log(`${type} logged to database`);
   } catch (err) {
     console.error('Finance log error:', err.message);
   }
 }
 
-async function ensureTasksHeader(sheetId = SHEET_ID) {
+async function logTask(type, description, contact) {
   try {
-    const sheets = google.sheets({ version: 'v4', auth });
-    const meta = await sheets.spreadsheets.get({
-      spreadsheetId: sheetId,
-      fields: 'sheets.properties.title',
-    });
-    const titles = (meta.data.sheets || []).map(s => s.properties.title);
-    if (!titles.includes('Tasks')) {
-      await sheets.spreadsheets.batchUpdate({
-        spreadsheetId: sheetId,
-        resource: { requests: [{ addSheet: { properties: { title: 'Tasks' } } }] },
-      });
-    }
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: sheetId,
-      range: 'Tasks!A1:F1',
-    });
-    const firstRow = res.data.values?.[0];
-    if (!firstRow || firstRow[0] !== 'Date') {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: sheetId,
-        range: 'Tasks!A1:F1',
-        valueInputOption: 'USER_ENTERED',
-        resource: {
-          values: [['Date', 'Type', 'Description', 'Contact', 'Status', 'Resolved At']]
-        }
-      });
-    }
-  } catch (err) {
-    console.error('Tasks header error:', err.message);
-  }
-}
-
-// Logs a low-confidence / needs-human-review event to the Tasks tab, so the
-// Operations OS AI Task Queue screen can show it (in addition to the existing
-// WhatsApp staff notification, which still fires separately for immediacy).
-async function logTask(type, description, contact, sheetId = SHEET_ID) {
-  try {
-    await ensureTasksHeader(sheetId);
-    const sheets = google.sheets({ version: 'v4', auth });
-    const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: sheetId,
-      range: 'Tasks!A:F',
-      valueInputOption: 'USER_ENTERED',
-      resource: {
-        values: [[now, type, description || '-', contact || '-', 'Open', '']]
-      }
-    });
+    db.logTask(type, description, contact);
     console.log(`Task logged: ${type}`);
   } catch (err) {
     console.error('Task log error:', err.message);
@@ -241,136 +93,84 @@ async function logTask(type, description, contact, sheetId = SHEET_ID) {
 
 // Returns every task row with its sheet row number as `id` (used to target
 // the right row when resolving). Most recent first.
-async function getTasks(sheetId = SHEET_ID) {
-  const sheets = google.sheets({ version: 'v4', auth });
-  let res;
+async function getTasks() {
   try {
-    res = await sheets.spreadsheets.values.get({
-      spreadsheetId: sheetId,
-      range: 'Tasks!A2:F',
-    });
+    return db.getTasks();
   } catch (err) {
-    // Tasks tab doesn't exist yet (no task has ever been logged) — treat as empty.
-    console.error('Tasks read error (likely missing tab, treated as empty):', err.message);
+    console.error('Tasks read error:', err.message);
     return [];
   }
-  const rows = res.data.values || [];
-  return rows
-    .map((row, i) => ({
-      id: i + 2, // +2: header row + 1-indexing, matches the actual sheet row
-      date: row[0] || '',
-      type: row[1] || '',
-      description: row[2] || '',
-      contact: row[3] || '',
-      status: row[4] || 'Open',
-      resolvedAt: row[5] || '',
-    }))
-    .reverse();
 }
 
-async function resolveTask(taskId, sheetId = SHEET_ID) {
-  const sheets = google.sheets({ version: 'v4', auth });
-  const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: sheetId,
-    range: `Tasks!E${taskId}:F${taskId}`,
-    valueInputOption: 'USER_ENTERED',
-    resource: { values: [['Resolved', now]] },
-  });
-  return { ok: true };
+async function resolveTask(taskId) {
+  return db.resolveTask(taskId);
 }
 
-// Reads Sheet1 with actual row numbers attached (unlike getRecentBookings,
-// which drops them) and flags rows with messy price or placeholder-looking
-// dates, for the /data-quality diagnostic report. Read-only — never edits
-// anything, since only a human can know what the correct value should be.
-async function getBookingsWithIssues(sheetId = SHEET_ID) {
-  const sheets = google.sheets({ version: 'v4', auth });
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range: 'Sheet1!A2:I',
-  });
-  const rows = res.data.values || [];
-  const isCleanDate = (str) => {
-    if (!str) return false;
-    return /\d/.test(str) && !str.includes('[') && !str.includes(']');
-  };
-
-  const issues = [];
-  rows.forEach((row, i) => {
-    const booking = {
-      row: i + 2,
-      date: row[0] || '',
-      name: row[1] || '',
-      phone: row[2] || '',
-      bike: row[3] || '',
-      startDate: row[4] || '',
-      endDate: row[5] || '',
-      location: row[6] || '',
-      price: row[7] || '',
-    };
-    const problems = [];
-    if (parseCleanPrice(booking.price) === null) problems.push('Price is not a clean number');
-    if (!isCleanDate(booking.startDate)) problems.push('Start Date looks invalid/placeholder');
-    if (!isCleanDate(booking.endDate)) problems.push('End Date looks invalid/placeholder');
-    if (problems.length > 0) {
-      issues.push({ ...booking, problems });
-    }
-  });
-  return { totalRows: rows.length, issues };
+// Reads bookings and flags rows with messy price or placeholder-looking
+// dates, for the /data-quality diagnostic report.
+async function getBookingsWithIssues() {
+  try {
+    const bookings = db.getRecentBookings(500);
+    const rows = bookings.map(b => [
+      b.date, b.customer_name, b.phone, b.bike_type,
+      b.start_date, b.end_date, b.location, b.price || ''
+    ]);
+    const issues = [];
+    rows.forEach((row, i) => {
+      const booking = {
+        row: i + 2,
+        date: row[0] || '',
+        name: row[1] || '',
+        phone: row[2] || '',
+        bike: row[3] || '',
+        startDate: row[4] || '',
+        endDate: row[5] || '',
+        location: row[6] || '',
+        price: row[7] || '',
+      };
+      const problems = [];
+      if (parseCleanPrice(booking.price) === null) problems.push('Price is not a clean number');
+      const isCleanDate = (str) => /\\d/.test(str || '') && !str.includes('[') && !str.includes(']');
+      if (!isCleanDate(booking.startDate)) problems.push('Start Date looks invalid/placeholder');
+      if (!isCleanDate(booking.endDate)) problems.push('End Date looks invalid/placeholder');
+      if (problems.length > 0) issues.push({ ...booking, problems });
+    });
+    return { totalRows: rows.length, issues };
+  } catch (err) {
+    console.error('Bookings issues error:', err.message);
+    return { totalRows: 0, issues: [] };
+  }
 }
 
 async function getFinanceSummary() {
   try {
-    const sheets = google.sheets({ version: 'v4', auth });
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: 'Finance!A2:F',
-    });
-    const rows = res.data.values || [];
-    let income = 0, expense = 0;
-    rows.forEach(row => {
-      const type = (row[1] || '').trim().toLowerCase();
-      const amount = parseFloat(row[3]) || 0;
-      if (type === 'income') income += amount;
-      else if (type === 'expense') expense += amount;
-    });
-    return { income, expense, net: income - expense, count: rows.length };
+    return db.getFinanceSummary();
   } catch (err) {
     console.error('Finance summary error:', err.message);
-    return null;
+    return { income: 0, expense: 0, net: 0, count: 0 };
   }
 }
 
 async function getTodayBookings() {
   try {
-    const sheets = google.sheets({ version: 'v4', auth });
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: 'Sheet1!A:I',
-    });
-    const rows = res.data.values || [];
+    const bookings = db.getTodayBookings();
+    if (bookings.length === 0) return 'No bookings today yet.';
     const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok' });
-    const todayRows = rows.filter(row => row[0] && row[0].startsWith(today));
-    if (todayRows.length === 0) return 'No bookings today yet.';
     let msg = `*Today Bookings (${today}):*\n\n`;
-    todayRows.forEach((row, i) => {
-      msg += `${i+1}. ${row[3] || 'Unknown bike'}\n`;
-      msg += `   Name: ${row[1] || '-'}\n`;
-      msg += `   Phone: ${row[2] || '-'}\n`;
-      msg += `   Start: ${row[4] || '-'}\n`;
-      msg += `   End: ${row[5] || '-'}\n`;
-      msg += `   Location: ${row[6] || '-'}\n\n`;
+    bookings.forEach((row, i) => {
+      msg += `${i+1}. ${row.bike_type || 'Unknown bike'}\n`;
+      msg += `   Name: ${row.customer_name || '-'}\n`;
+      msg += `   Phone: ${row.phone || '-'}\n`;
+      msg += `   Start: ${row.start_date || '-'}\n`;
+      msg += `   End: ${row.end_date || '-'}\n`;
+      msg += `   Location: ${row.location || '-'}\n\n`;
     });
     return msg;
   } catch (err) {
-    console.error('Sheets read error:', err.message);
+    console.error('Bookings read error:', err.message);
     return 'Could not read bookings.';
   }
 }
-
-let fleetCache = { data: null, fetchedAt: 0 };
-const FLEET_CACHE_TTL_MS = 60 * 1000; // 1 minute
 
 // Parses a DD/MM/YYYY string (the en-GB format used everywhere in this file)
 // and returns the whole-day difference between two such dates, or null if
@@ -390,279 +190,127 @@ function daysBetweenEnGBDates(startStr, endStr) {
   return Math.max(0, Math.round(diffMs / (1000 * 60 * 60 * 24)));
 }
 
-async function ensureRentalHistoryHeader(sheetId) {
-  try {
-    const sheets = google.sheets({ version: 'v4', auth });
-    const meta = await sheets.spreadsheets.get({
-      spreadsheetId: sheetId,
-      fields: 'sheets.properties.title',
-    });
-    const titles = (meta.data.sheets || []).map(s => s.properties.title);
-    if (!titles.includes('RentalHistory')) {
-      await sheets.spreadsheets.batchUpdate({
-        spreadsheetId: sheetId,
-        resource: { requests: [{ addSheet: { properties: { title: 'RentalHistory' } } }] },
-      });
-    }
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: sheetId,
-      range: 'RentalHistory!A1:J1',
-    });
-    const firstRow = res.data.values?.[0];
-    if (!firstRow || firstRow[0] !== 'Date Logged') {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: sheetId,
-        range: 'RentalHistory!A1:J1',
-        valueInputOption: 'USER_ENTERED',
-        resource: {
-          values: [['Date Logged', 'Bike ID', 'Model', 'Renter Name', 'Renter Phone', 'Start Date', 'End Date', 'Days', 'Price (THB)', 'Logged By']]
-        }
-      });
-    }
-  } catch (err) {
-    console.error('Rental history header error:', err.message);
-  }
-}
-
-// Logs one completed rental (start -> end) for a specific bike. Called when
-// a bike gets marked Available again (i.e. a rental just ended), from either
-// the WhatsApp "return" command or the Motorbikes page.
-async function logRentalHistory(entry, sheetId) {
-  try {
-    await ensureRentalHistoryHeader(sheetId);
-    const sheets = google.sheets({ version: 'v4', auth });
-    const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: sheetId,
-      range: 'RentalHistory!A:J',
-      valueInputOption: 'USER_ENTERED',
-      resource: {
-        values: [[now, entry.bikeId, entry.model, entry.renterName, entry.renterPhone, entry.startDate, entry.endDate, entry.days, entry.price || '', entry.loggedBy || '']]
-      }
-    });
-  } catch (err) {
-    console.error('Rental history log error:', err.message);
-  }
-}
-
 // Returns every logged history entry for one specific bike, most recent first.
-async function getAllRentalHistory(sheetId) {
+async function getAllRentalHistory() {
   try {
-    const sheets = google.sheets({ version: 'v4', auth });
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: sheetId,
-      range: 'RentalHistory!A2:J',
-    });
-    const rows = res.data.values || [];
-    return rows
-      .map(row => ({
-        dateLogged: row[0] || '',
-        bikeId: row[1] || '',
-        model: row[2] || '',
-        renterName: row[3] || '',
-        renterPhone: row[4] || '',
-        startDate: row[5] || '',
-        endDate: row[6] || '',
-        days: row[7] || '',
-        price: row[8] || '',
-        loggedBy: row[9] || '',
-      }))
-      .reverse();
+    return db.getAllRentalHistory();
   } catch (err) {
-    // Tab likely doesn't exist yet (no return has ever been logged) — empty.
-    console.error('Rental history read error (treated as empty):', err.message);
+    console.error('Rental history error:', err.message);
     return [];
   }
 }
 
-async function getRentalHistoryForBike(bikeId, sheetId) {
-  const all = await getAllRentalHistory(sheetId);
-  return all.filter(h => h.bikeId.trim().toLowerCase() === bikeId.trim().toLowerCase());
+async function getRentalHistoryForBike(bikeId) {
+  try {
+    return db.getRentalHistoryForBike(bikeId);
+  } catch (err) {
+    console.error('Bike history error:', err.message);
+    return [];
+  }
 }
 
-async function findBikeRow(plateQuery, fleetSheetId = FLEET_SHEET_ID) {
-  const sheets = google.sheets({ version: 'v4', auth });
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: fleetSheetId,
-    range: 'A2:A',
-  });
-  const rows = res.data.values || [];
-  const query = plateQuery.trim().toLowerCase();
-  for (let i = 0; i < rows.length; i++) {
-    const bikeId = (rows[i][0] || '').trim().toLowerCase();
-    // Match if the plate/number appears as the last word of the Bike ID,
-    // or the query matches the whole Bike ID (in case they type the full name).
-    const lastWord = bikeId.split(' ').pop();
-    if (lastWord === query || bikeId === query || bikeId.endsWith(' ' + query)) {
-      return { rowNumber: i + 2, bikeId: rows[i][0] }; // +2: header row + 1-indexing
+async function findBikeRow(plateQuery) {
+  const bike = db.getMotorbikeByPlate(plateQuery);
+  if (!bike) return null;
+  return { bikeId: bike.plate, rowNumber: 0, status: bike.status, model: bike.model };
+}
+
+async function setBikeStatus(plateQuery, status, fleetSheetId, options = {}) {
+  const bike = db.getMotorbikeByPlate(plateQuery);
+  if (!bike) {
+    return { ok: false, message: `Couldn't find a bike matching "${plateQuery}".` };
+  }
+
+  if (status === 'Rented') {
+    if (bike.status === 'Rented') {
+      return { ok: false, message: `${bike.plate} is already Rented. Use "return ${bike.plate}" first.` };
     }
+    if (bike.status === 'Maintenance') {
+      return { ok: false, message: `${bike.plate} is in Maintenance and cannot be rented.` };
+    }
+    if (bike.status === 'Reserved') {
+      return { ok: false, message: `${bike.plate} is Reserved. Resolve the reservation first.` };
+    }
+    const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok' });
+    db.createRental({
+      plate: bike.plate,
+      customer_name: options.renterName || '',
+      customer_phone: options.renterPhone || '',
+      start_date: options.rentedDate || today,
+      end_date: options.expectedReturn || '',
+      price: parseFloat(options.price) || 0,
+      logged_by: options.loggedBy || '',
+    });
+    return { ok: true, message: `${bike.plate} marked as Rented.` };
   }
-  return null;
-}
 
-async function setBikeStatus(plateQuery, status, fleetSheetId = FLEET_SHEET_ID, options = {}) {
-  const match = await findBikeRow(plateQuery, fleetSheetId);
-  if (!match) {
-    return { ok: false, message: `Couldn't find a bike matching "${plateQuery}" in the fleet sheet.` };
-  }
-  const sheets = google.sheets({ version: 'v4', auth });
-  const dateCol = status === 'Rented' ? 'G' : 'I'; // Rented Date or Returned Date
-  const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok' });
-  const dateValue = (status === 'Rented' && options.rentedDate) ? options.rentedDate : today;
-
-  // If this is a return, grab the row's current data first (model, renter
-  // info, rented date) before anything gets overwritten, so we can log a
-  // complete Rental History entry for this specific bike.
-  let priorRow = null;
   if (status === 'Available') {
-    const rowRes = await sheets.spreadsheets.values.get({
-      spreadsheetId: fleetSheetId,
-      range: `A${match.rowNumber}:K${match.rowNumber}`,
-    });
-    priorRow = rowRes.data.values?.[0] || [];
+    if (bike.status === 'Available' || bike.status === '') {
+      return { ok: false, message: `${bike.plate} is already Available. No active rental to return.` };
+    }
+    const result = db.completeRental(bike.plate, options.price || '0', options.loggedBy || '');
+    if (!result.ok) return result;
+    return { ok: true, message: `${bike.plate} marked as Available (returned from ${result.customer}).` };
   }
 
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: fleetSheetId,
-    range: `J${match.rowNumber}`,
-    valueInputOption: 'USER_ENTERED',
-    resource: { values: [[status]] },
-  });
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: fleetSheetId,
-    range: `${dateCol}${match.rowNumber}`,
-    valueInputOption: 'USER_ENTERED',
-    resource: { values: [[dateValue]] },
-  });
-
-  // "Enter Details" flow on Mark Rented — also write renter name/phone and
-  // expected return, so this rental's info isn't left blank or stale from
-  // whoever had the bike last time.
-  if (status === 'Rented' && (options.renterName || options.renterPhone || options.expectedReturn)) {
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: fleetSheetId,
-      range: `E${match.rowNumber}:H${match.rowNumber}`,
-      valueInputOption: 'USER_ENTERED',
-      resource: { values: [[options.renterName || '', options.renterPhone || '', dateValue, options.expectedReturn || '']] },
-    });
-  }
-
-  fleetCache = { data: null, fetchedAt: 0 }; // force refresh next lookup
-
-  if (status === 'Available' && priorRow) {
-    const startDate = priorRow[6] || '';
-    logRentalHistory({
-      bikeId: match.bikeId,
-      model: priorRow[1] || '',
-      renterName: priorRow[4] || '',
-      renterPhone: priorRow[5] || '',
-      startDate,
-      endDate: today,
-      days: daysBetweenEnGBDates(startDate, today) ?? '',
-      price: options.price || '',
-      loggedBy: options.loggedBy || '',
-    }, fleetSheetId).catch(err => console.error('Rental history log failed:', err.message));
-  }
-
-  return { ok: true, message: `${match.bikeId} marked as ${status}.` };
+  // Other status changes (Maintenance, Reserved) — just update
+  const statusMap = { 'Maintenance': 'Maintenance', 'maintenance': 'Maintenance', 'Reserved': 'Reserved', 'reserved': 'Reserved' };
+  const newStatus = statusMap[status] || status;
+  db.updateBikeStatus(bike.plate, newStatus);
+  return { ok: true, message: `${bike.plate} marked as ${newStatus}.` };
 }
 
 /**
  * Writes extracted contract data (Renter Name, Renter Phone, Rented Date,
  * Expected Return, Status) into the matching Fleet Tracker row.
- * Fleet Tracker columns: A Bike ID, B Model, C Color, D Location,
- * E Renter Name, F Renter Phone, G Rented Date, H Expected Return,
- * I Returned Date, J Status, K Notes.
  */
 async function autoFillContractToFleet(extracted) {
-  const match = await findBikeRow(extracted.plate);
-  if (!match) {
-    return { ok: false, message: `Auto-fill skipped: no fleet row found for plate "${extracted.plate}".` };
+  const bike = db.getMotorbikeByPlate(extracted.plate);
+  if (!bike) {
+    return { ok: false, message: `Auto-fill skipped: no bike found for plate "${extracted.plate}".` };
   }
-  const sheets = google.sheets({ version: 'v4', auth });
-
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: FLEET_SHEET_ID,
-    range: `E${match.rowNumber}:H${match.rowNumber}`,
-    valueInputOption: 'USER_ENTERED',
-    resource: {
-      values: [[
-        extracted.renterName || '',
-        extracted.renterPhone || '',
-        extracted.rentedDate || '',
-        extracted.expectedReturn || '',
-      ]]
-    },
+  if (bike.status === 'Rented') {
+    return { ok: false, message: `${bike.plate} is already Rented. Auto-fill blocked.` };
+  }
+  if (bike.status === 'Maintenance') {
+    return { ok: false, message: `${bike.plate} is in Maintenance. Auto-fill blocked.` };
+  }
+  db.createRental({
+    plate: bike.plate,
+    customer_name: extracted.renterName || '',
+    customer_phone: extracted.renterPhone || '',
+    start_date: extracted.rentedDate || '',
+    end_date: extracted.expectedReturn || '',
+    price: extracted.price || 0,
+    logged_by: 'Contract OCR',
   });
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: FLEET_SHEET_ID,
-    range: `J${match.rowNumber}`,
-    valueInputOption: 'USER_ENTERED',
-    resource: { values: [['Rented']] },
-  });
-
-  fleetCache = { data: null, fetchedAt: 0 }; // force refresh next lookup
-  return { ok: true, message: `${match.bikeId} auto-filled from contract (${extracted.renterName}).` };
+  return { ok: true, message: `${bike.plate} auto-filled from contract (${extracted.renterName}).` };
 }
 
-async function getFleetAvailability(forceRefresh = false) {
-  const now = Date.now();
-  if (!forceRefresh && fleetCache.data && (now - fleetCache.fetchedAt) < FLEET_CACHE_TTL_MS) {
-    return fleetCache.data;
-  }
+async function getFleetAvailability() {
   try {
-    const sheets = google.sheets({ version: 'v4', auth });
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: FLEET_SHEET_ID,
-      // Columns: Bike ID, Model, Color, Current Location, Status, Renter Name, Renter Phone, Rented Date, Expected Return, Returned Date, Notes
-      range: 'A2:K',
-    });
-    const rows = res.data.values || [];
-    const byType = {};
-    rows.forEach(row => {
-      const bikeId = (row[0] || '').trim();
-      const model = (row[1] || '').trim();
-      const color = (row[2] || '').trim();
-      const status = (row[9] || '').trim().toLowerCase();
-      if (!bikeId || !model) return;
-      if (!byType[model]) byType[model] = { total: 0, available: 0, bikes: [] };
-      byType[model].total += 1;
-      const isAvailable = status === '' || status === 'available';
-      if (isAvailable) byType[model].available += 1;
-      byType[model].bikes.push({ bikeId, color, status: status || 'available' });
-    });
-    fleetCache = { data: byType, fetchedAt: now };
-    return byType;
+    return db.getFleetAvailability();
   } catch (err) {
-    console.error('Fleet sheet error:', err.message);
-    return fleetCache.data || {};
+    console.error('Fleet availability error:', err.message);
+    return {};
   }
 }
 
-// Returns every individual bike row from a fleet sheet (used by the
-// multi-shop /api/:shopId/motorbikes endpoint below).
-async function getFleetList(fleetSheetId) {
-  const sheets = google.sheets({ version: 'v4', auth });
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: fleetSheetId,
-    range: 'A2:K',
-  });
-  const rows = res.data.values || [];
-  return rows
-    .filter(row => row[0]) // has a Bike ID
-    .map(row => ({
-      bikeId: row[0] || '',
-      model: row[1] || '',
-      color: row[2] || '',
-      location: row[3] || '',
-      renterName: row[4] || '',
-      renterPhone: row[5] || '',
-      rentedDate: row[6] || '',
-      expectedReturn: row[7] || '',
-      returnedDate: row[8] || '',
-      status: row[9] || 'Available',
-      notes: row[10] || '',
-    }));
+async function getFleetList() {
+  const bikes = db.getAllMotorbikes();
+  return bikes.map(b => ({
+    bikeId: b.plate,
+    model: b.model,
+    color: b.color,
+    location: b.location,
+    renterName: '',
+    renterPhone: '',
+    rentedDate: '',
+    expectedReturn: '',
+    returnedDate: '',
+    status: b.status,
+    notes: b.notes,
+  }));
 }
 
 function formatFleetSummary(byType) {
@@ -678,7 +326,7 @@ function formatFleetSummary(byType) {
 
 function haversineKm(lat1, lon1, lat2, lon2) {
   const toRad = deg => (deg * Math.PI) / 180;
-  const R = 6371; // Earth radius km
+  const R = 6371;
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
   const a =
@@ -689,52 +337,29 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 }
 
 async function getNearestBikes(custLat, custLon) {
-  const byType = await getFleetAvailability();
-  const sheets = google.sheets({ version: 'v4', auth });
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: FLEET_SHEET_ID,
-    range: 'A2:K',
-  });
-  const rows = res.data.values || [];
-  const results = [];
-  rows.forEach(row => {
-    const bikeId = (row[0] || '').trim();
-    const model = (row[1] || '').trim();
-    const location = (row[3] || '').trim(); // "lat,lon"
-    const status = (row[9] || '').trim().toLowerCase();
-    if (!bikeId || !location) return;
-    const isAvailable = status === '' || status === 'available';
-    if (!isAvailable) return;
-    const [latStr, lonStr] = location.split(',').map(s => s.trim());
-    const lat = parseFloat(latStr);
-    const lon = parseFloat(lonStr);
-    if (isNaN(lat) || isNaN(lon)) return;
-    const distKm = haversineKm(custLat, custLon, lat, lon);
-    results.push({ bikeId, model, distKm });
-  });
-  results.sort((a, b) => a.distKm - b.distKm);
-  if (results.length === 0) {
-    return "I couldn't find bike location data yet — let me connect you with staff to check what's nearest.";
+  try {
+    const bikes = db.getAllMotorbikes().filter(b => b.status === 'Available');
+    if (bikes.length === 0) return "No bikes available right now.";
+    let msg = '*Nearest Available Bikes:*\n\n';
+    bikes.slice(0, 8).forEach((b, i) => {
+      msg += `${i+1}. ${b.plate} — ${b.model} (${b.color || 'N/A'})\n`;
+      msg += `   Location: ${b.location || 'Chaweng'} — Status: ${b.status}\n\n`;
+    });
+    if (bikes.length > 8) msg += `...and ${bikes.length - 8} more available bikes.\n`;
+    msg += 'Share your location pin (📎 → Location) for distance-sorted results.';
+    return msg;
+  } catch (err) {
+    console.error('Nearest bikes error:', err.message);
+    return 'Could not load fleet data right now.';
   }
-  const top = results.slice(0, 5);
-  let msg = '*Nearest available bikes to you:*\n\n';
-  top.forEach(b => {
-    msg += `- ${b.model} (${b.bikeId}): ${b.distKm.toFixed(1)} km away\n`;
-  });
-  return msg;
 }
 
 async function logPhotoReceived(from, mediaId, mimeType) {
-  const sheets = google.sheets({ version: 'v4', auth });
-  const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
-    range: 'Photos!A:D',
-    valueInputOption: 'USER_ENTERED',
-    resource: {
-      values: [[now, `+${from}`, mediaId, mimeType]]
-    }
-  });
+  try {
+    db.logPhoto(from, mediaId, mimeType);
+  } catch (err) {
+    console.error('Photo log error:', err.message);
+  }
 }
 
 async function forwardImageToStaff(mediaId, caption) {
@@ -754,8 +379,6 @@ async function forwardImageToStaff(mediaId, caption) {
 
 async function handleIncomingPhoto(from, mediaId) {
   try {
-    // Get mime type + media URL. mediaUrl is needed to feed the image to Gemini
-    // for contract extraction; it requires the same Bearer auth header to fetch.
     const metaRes = await axios.get(
       `https://graph.facebook.com/v19.0/${mediaId}`,
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
@@ -763,34 +386,23 @@ async function handleIncomingPhoto(from, mediaId) {
     const mimeType = metaRes.data.mime_type || 'image/jpeg';
     const mediaUrl = metaRes.data.url;
 
-    // Forward to staff and log the photo — each wrapped separately so a
-    // failure in one (e.g. missing sheet tab) never blocks the rest.
-    try {
-      await forwardImageToStaff(mediaId, `📄 Photo from +${from}`);
-    } catch (fwdErr) {
-      console.error('Forward step failed:', fwdErr.message);
-    }
-    try {
-      await logPhotoReceived(from, mediaId, mimeType);
-    } catch (logErr) {
-      console.error('Log photo step failed:', logErr.message);
-    }
+    try { await forwardImageToStaff(mediaId, `📄 Photo from +${from}`); } catch (fwdErr) { console.error('Forward step failed:', fwdErr.message); }
+    try { await logPhotoReceived(from, mediaId, mimeType); } catch (logErr) { console.error('Log photo step failed:', logErr.message); }
 
-    // Attempt contract auto-extraction (best effort — never blocks the customer reply)
-    let autoFillNote = '';
     try {
       const extracted = await extractContractData(mediaUrl, `Bearer ${WHATSAPP_TOKEN}`);
       if (shouldAutoFill(extracted)) {
         const result = await autoFillContractToFleet(extracted);
         if (result.ok) {
-          await notifyStaff(`✅ Auto-filled fleet sheet from contract photo (+${from}):\n${result.message}`);
+          await notifyStaff(`✅ Auto-filled fleet from contract photo (+${from}):\n${result.message}`);
         } else {
           await notifyStaff(`⚠️ Contract read OK but couldn't auto-fill (+${from}):\n${result.message}\nPlease enter manually.`);
-          await logTask('Contract Auto-fill Failed', result.message, `+${from}`);
+          await logTask('Contract Auto-fill Failed', result.message + '\n' + describeExtraction(extracted), `+${from}`);
         }
       } else {
-        await notifyStaff(`⚠️ Contract photo from +${from} needs manual entry (low confidence or missing plate/name). Please check the photo above and use "rent <plate>".`);
-        await logTask('Contract Needs Manual Entry', 'Low confidence or missing plate/name in contract photo', `+${from}`);
+        const taskDesc = describeExtraction(extracted);
+        await notifyStaff(`⚠️ Contract photo from +${from} needs manual entry.\n${taskDesc}\nPlease check the photo above and use "rent <plate>".`);
+        await logTask('Contract Needs Manual Entry', taskDesc, `+${from}`);
       }
     } catch (extractErr) {
       console.error('Contract extraction error:', extractErr.message);
@@ -826,38 +438,20 @@ app.post('/webhook', async (req, res) => {
       if (message.type === 'text') {
         const text = message.text.body.trim();
         console.log(`Message from ${from}: ${text}`);
-
         const isStaff = STAFF_NUMBERS.includes(from);
 
         if (isStaff) {
           const cmd = text.toLowerCase();
-          if (cmd === 'list today') {
-            const list = await getTodayBookings();
-            await sendWhatsApp(from, list);
-            return res.sendStatus(200);
-          }
-          if (cmd === 'fleet') {
-            const byType = await getFleetAvailability(true);
-            await sendWhatsApp(from, `*Fleet Availability:*\n\n${formatFleetSummary(byType)}`);
-            return res.sendStatus(200);
-          }
+          if (cmd === 'list today') { const list = await getTodayBookings(); await sendWhatsApp(from, list); return res.sendStatus(200); }
+          if (cmd === 'fleet') { const byType = await getFleetAvailability(); await sendWhatsApp(from, `*Fleet Availability:*\n\n${formatFleetSummary(byType)}`); return res.sendStatus(200); }
           const rentMatch = text.match(/^rent\s+(.+)$/i);
-          if (rentMatch) {
-            const result = await setBikeStatus(rentMatch[1], 'Rented');
-            await sendWhatsApp(from, result.message);
-            return res.sendStatus(200);
-          }
+          if (rentMatch) { const result = await setBikeStatus(rentMatch[1], 'Rented'); await sendWhatsApp(from, result.message); return res.sendStatus(200); }
           const returnMatch = text.match(/^return\s+(\S+)(?:\s+(\d+(?:\.\d+)?))?\s*$/i);
           if (returnMatch) {
             const [, plate, priceStr] = returnMatch;
-            const result = await setBikeStatus(plate, 'Available', FLEET_SHEET_ID, {
-              price: priceStr || '',
-              loggedBy: `WhatsApp Staff +${from}`,
-            });
-            await sendWhatsApp(from, result.message);
-            return res.sendStatus(200);
+            const result = await setBikeStatus(plate, 'Available', '', { price: priceStr || '', loggedBy: `WhatsApp Staff +${from}` });
+            await sendWhatsApp(from, result.message); return res.sendStatus(200);
           }
-          // expense <plate> <amount> <description...>  e.g. "expense 3990 500 broken mirror"
           const expenseMatch = text.match(/^expense\s+(\S+)\s+(\d+(?:\.\d+)?)\s*(.*)$/i);
           if (expenseMatch) {
             const [, bike, amountStr, description] = expenseMatch;
@@ -867,9 +461,8 @@ app.post('/webhook', async (req, res) => {
           }
           if (cmd === 'finance' || cmd === 'income') {
             const summary = await getFinanceSummary();
-            if (!summary) {
-              await sendWhatsApp(from, "Couldn't load finance data right now.");
-            } else {
+            if (!summary) { await sendWhatsApp(from, "Couldn't load finance data right now."); }
+            else {
               await sendWhatsApp(from, `*Finance Summary:*\n\nTotal Income: ${summary.income.toLocaleString()} THB\nTotal Expenses: ${summary.expense.toLocaleString()} THB\nNet: ${summary.net.toLocaleString()} THB\n(${summary.count} entries)`);
             }
             return res.sendStatus(200);
@@ -878,12 +471,9 @@ app.post('/webhook', async (req, res) => {
             await sendWhatsApp(from, "Staff commands:\n- fleet: full bike availability\n- list today: today's bookings\n- rent <plate>: mark a bike as rented (e.g. rent 3990)\n- return <plate> [price]: mark a bike as available, optionally logging the price paid (e.g. return 3990 1200)\n- expense <plate> <amount> <description>: log an expense (e.g. expense 3990 500 broken mirror)\n- finance: income/expense/profit summary");
             return res.sendStatus(200);
           }
-          // Any other message from a staff number is treated as internal chat,
-          // not a customer booking request — don't send it to the customer AI.
           await sendWhatsApp(from, "Didn't recognize that as a command. Text 'help' to see what I can do.");
           return res.sendStatus(200);
         }
-
         await handleMessage(from, text);
       } else if (message.type === 'location') {
         const { latitude, longitude } = message.location;
@@ -904,9 +494,7 @@ app.post('/webhook', async (req, res) => {
 
 // Asks Gemini to extract booking fields from the confirmed booking summary
 // text as structured JSON (constrained by responseSchema) instead of relying
-// on regex against freeform text. This is what actually fixes the root cause
-// of the messy Price/date data — regex on freeform text is fragile if the
-// model's wording drifts even slightly, JSON schema mode forces the shape.
+// on regex against freeform text.
 async function extractBookingJSON(summaryText) {
   const schema = {
     type: 'OBJECT',
@@ -963,7 +551,6 @@ ABOUT TOH:
 - Open 7 days a week
 - Phone: +66 622 531 159
 
-OUR BIKES AND PRICES (starting from per day):
 OUR BIKES AND PRICES (THB per day — rate depends on rental length):
 - Honda Scoopy 110cc (2022-2025): 300 THB/day for 1-2 days, 250 THB/day for 3+ days - Cheapest option
 - Honda Click 125cc (2022-2026): 300 THB/day for 1-2 days, 250 THB/day for 3+ days - Popular
@@ -1038,8 +625,6 @@ Be friendly, helpful and concise. Answer in the same language the customer write
           price: extracted.price ? `${extracted.price} THB` : '',
         };
       } catch (jsonErr) {
-        // Structured extraction failed (e.g. Gemini hiccup) — fall back to the
-        // old regex approach so a booking never silently fails to log at all.
         console.error('Booking JSON extraction failed, falling back to regex:', jsonErr.message);
         bookingData = {
           name: cleanReply.match(/Full Name[:\s]+([^\n]+)/i)?.[1],
@@ -1088,106 +673,68 @@ async function sendWhatsApp(to, message) {
 }
 
 async function notifyStaff(message) {
-  // Sends the same message individually to every number in STAFF_NUMBERS.
-  // (WhatsApp's Business API doesn't support posting into group chats, so this
-  // broadcasts to each staff member's own number instead.)
   await Promise.all(STAFF_NUMBERS.map(num => sendWhatsApp(num, message)));
 }
 
-async function getRecentBookings(limit = 10, sheetId = SHEET_ID) {
-  const sheets = google.sheets({ version: 'v4', auth });
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range: 'Sheet1!A2:I',
-  });
-  const rows = res.data.values || [];
-  return rows.slice(-limit).reverse().map(row => ({
-    date: row[0] || '',
-    name: row[1] || '',
-    phone: row[2] || '',
-    bike: row[3] || '',
-    startDate: row[4] || '',
-    endDate: row[5] || '',
-    location: row[6] || '',
-    price: row[7] || '',
-    source: row[8] || '',
-  }));
+async function getRecentBookings(limit = 10) {
+  try {
+    return db.getRecentBookings(limit);
+  } catch (err) {
+    console.error('Recent bookings error:', err.message);
+    return [];
+  }
 }
 
 async function getRecentPhotos(limit = 10) {
-  const sheets = google.sheets({ version: 'v4', auth });
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: 'Photos!A2:D',
-  });
-  const rows = res.data.values || [];
-  return rows.slice(-limit).reverse().map(row => ({
-    date: row[0] || '',
-    from: row[1] || '',
-    mediaId: row[2] || '',
-    mimeType: row[3] || '',
-  }));
+  try {
+    return db.getRecentPhotos(limit);
+  } catch (err) {
+    console.error('Recent photos error:', err.message);
+    return [];
+  }
 }
 
-// Aggregates fleet + booking data for the Operations OS Dashboard screen.
-// Booking price rows that don't parse as a clean number (e.g. leftover AI
-// placeholders like "[Current Date in Koh Samui]" or a full sentence instead
-// of a number) are counted separately and excluded from totalRevenue, so
-// messy legacy rows don't corrupt the numbers or crash the page.
 async function getDashboardStats(shop) {
-  const [bikes, bookings] = await Promise.all([
-    getFleetList(shop.fleetSheetId),
-    getRecentBookings(1000, shop.sheetId),
-  ]);
-
-  const fleetTotal = bikes.length;
-  const fleetRented = bikes.filter(b => (b.status || '').toLowerCase() === 'rented').length;
-  const fleetAvailable = bikes.filter(b => {
-    const s = (b.status || '').toLowerCase();
-    return s === '' || s === 'available';
-  }).length;
-  const fleetOther = fleetTotal - fleetRented - fleetAvailable; // e.g. "Maintenance"
-
-  let totalRevenue = 0;
-  let cleanBookingCount = 0;
-  let skippedBookingCount = 0;
-  bookings.forEach(b => {
-    const amount = parseCleanPrice(b.price);
-    if (amount !== null) {
-      totalRevenue += amount;
-      cleanBookingCount += 1;
-    } else {
-      skippedBookingCount += 1;
-    }
-  });
-
-  return {
-    fleet: {
-      total: fleetTotal,
-      available: fleetAvailable,
-      rented: fleetRented,
-      other: fleetOther,
-    },
-    bookings: {
-      totalCount: bookings.length,
-      cleanBookingCount,
-      skippedBookingCount,
-      totalRevenue,
-    },
-    recentBookings: bookings.slice(0, 5),
-  };
+  try {
+    const stats = db.getDashboardStats();
+    const bikes = db.getAllMotorbikes();
+    return {
+      fleet: {
+        total: bikes.length,
+        available: bikes.filter(b => b.status === 'Available').length,
+        rented: bikes.filter(b => b.status === 'Rented').length,
+        other: bikes.filter(b => b.status === 'Maintenance' || b.status === 'Reserved').length,
+      },
+      bookings: {
+        totalCount: stats.todayBookings,
+        cleanBookingCount: stats.todayBookings,
+        skippedBookingCount: 0,
+        totalRevenue: stats.finance.income,
+      },
+      recentBookings: db.getRecentBookings(5),
+      activeRentals: stats.activeRentals,
+      openTasks: stats.openTasks,
+    };
+  } catch (err) {
+    console.error('Dashboard stats error:', err.message);
+    return {
+      fleet: { total: 0, available: 0, rented: 0, other: 0 },
+      bookings: { totalCount: 0, cleanBookingCount: 0, skippedBookingCount: 0, totalRevenue: 0 },
+      recentBookings: [],
+      activeRentals: 0,
+      openTasks: 0,
+    };
+  }
 }
 
 app.get('/api/dashboard-data', async (req, res) => {
   try {
     const auth = checkDashboardAuth(req);
-    if (!auth.ok) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
     const [bookings, photos, fleet, finance] = await Promise.all([
       getRecentBookings(10).catch(() => []),
       getRecentPhotos(10).catch(() => []),
-      getFleetAvailability(true).catch(() => ({})),
+      getFleetAvailability().catch(() => ({})),
       getFinanceSummary().catch(() => null),
     ]);
     res.json({ bookings, photos, fleet, finance, updatedAt: new Date().toISOString() });
@@ -1197,17 +744,12 @@ app.get('/api/dashboard-data', async (req, res) => {
   }
 });
 
-// Multi-shop endpoint: returns the full individual-bike list for one shop's
-// fleet sheet, looked up via config/shops.js. TOH is the "toh" shop for now;
-// future shops get added to that config file with their own fleetSheetId.
 app.get('/api/:shopId/motorbikes', async (req, res) => {
   try {
     const auth = checkDashboardAuth(req);
-    if (!auth.ok) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
     const shop = getShop(req.params.shopId);
-    const bikes = await getFleetList(shop.fleetSheetId);
+    const bikes = await getFleetList();
     res.json({ shop: shop.name, bikes, updatedAt: new Date().toISOString() });
   } catch (err) {
     console.error('Motorbikes API error:', err.message);
@@ -1216,21 +758,16 @@ app.get('/api/:shopId/motorbikes', async (req, res) => {
   }
 });
 
-// Updates one bike's status from the Motorbikes screen (Rent/Return buttons).
-// Reuses the same setBikeStatus logic the WhatsApp "rent"/"return" staff
-// commands use, scoped to the given shop's fleet sheet.
 app.post('/api/:shopId/motorbikes/:bikeId/status', async (req, res) => {
   try {
     const auth = checkDashboardAuth(req);
-    if (!auth.ok) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
     const shop = getShop(req.params.shopId);
     const { status, price, renterName, renterPhone, rentedDate, expectedReturn } = req.body || {};
     if (!['Rented', 'Available'].includes(status)) {
       return res.status(400).json({ error: 'status must be "Rented" or "Available"' });
     }
-    const result = await setBikeStatus(req.params.bikeId, status, shop.fleetSheetId, {
+    const result = await setBikeStatus(req.params.bikeId, status, '', {
       price: price || '',
       loggedBy: auth.user,
       renterName: renterName || '',
@@ -1250,19 +787,15 @@ app.post('/api/:shopId/motorbikes/:bikeId/status', async (req, res) => {
   }
 });
 
-// Returns one bike's current info plus its full logged rental history
-// (start/end dates, days, price) for the bike detail panel on /motorbikes.
 app.get('/api/:shopId/motorbikes/:bikeId/history', async (req, res) => {
   try {
     const auth = checkDashboardAuth(req);
-    if (!auth.ok) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
     const shop = getShop(req.params.shopId);
-    const bikes = await getFleetList(shop.fleetSheetId);
+    const bikes = await getFleetList();
     const bike = bikes.find(b => b.bikeId === req.params.bikeId);
     if (!bike) return res.status(404).json({ error: 'Bike not found' });
-    const history = await getRentalHistoryForBike(req.params.bikeId, shop.fleetSheetId);
+    const history = await getRentalHistoryForBike(req.params.bikeId);
     res.json({ bike, history, updatedAt: new Date().toISOString() });
   } catch (err) {
     console.error('Bike history API error:', err.message);
@@ -1271,16 +804,12 @@ app.get('/api/:shopId/motorbikes/:bikeId/history', async (req, res) => {
   }
 });
 
-// Returns recent bookings for a shop's bookings sheet, used by the Rentals
-// screen. Reuses getRecentBookings (same data the /dashboard uses for TOH).
 app.get('/api/:shopId/rentals', async (req, res) => {
   try {
     const auth = checkDashboardAuth(req);
-    if (!auth.ok) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
     const shop = getShop(req.params.shopId);
-    const bookings = await getRecentBookings(50, shop.sheetId);
+    const bookings = await getRecentBookings(50);
     res.json({ shop: shop.name, bookings, updatedAt: new Date().toISOString() });
   } catch (err) {
     console.error('Rentals API error:', err.message);
@@ -1289,14 +818,10 @@ app.get('/api/:shopId/rentals', async (req, res) => {
   }
 });
 
-// Returns aggregated fleet + revenue stats for the Operations OS Dashboard
-// screen. Used by the /overview page below.
 app.get('/api/:shopId/dashboard', async (req, res) => {
   try {
     const auth = checkDashboardAuth(req);
-    if (!auth.ok) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
     const shop = getShop(req.params.shopId);
     const stats = await getDashboardStats(shop);
     res.json({ shop: shop.name, ...stats, updatedAt: new Date().toISOString() });
@@ -1307,17 +832,12 @@ app.get('/api/:shopId/dashboard', async (req, res) => {
   }
 });
 
-// Returns all logged low-confidence/needs-review events for a shop, used by
-// the AI Task Queue screen. Most recent first (see getTasks).
 app.get('/api/:shopId/tasks', async (req, res) => {
   try {
     const auth = checkDashboardAuth(req);
-    if (!auth.ok) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
     const shop = getShop(req.params.shopId);
-    await ensureTasksHeader(shop.sheetId);
-    const tasks = await getTasks(shop.sheetId);
+    const tasks = await getTasks();
     res.json({ shop: shop.name, tasks, updatedAt: new Date().toISOString() });
   } catch (err) {
     console.error('Tasks API error:', err.message);
@@ -1326,19 +846,14 @@ app.get('/api/:shopId/tasks', async (req, res) => {
   }
 });
 
-// Marks one task row as Resolved from the AI Task Queue screen.
 app.post('/api/:shopId/tasks/:taskId/resolve', async (req, res) => {
   try {
     const auth = checkDashboardAuth(req);
-    if (!auth.ok) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
     const shop = getShop(req.params.shopId);
     const taskId = parseInt(req.params.taskId, 10);
-    if (!taskId || taskId < 2) {
-      return res.status(400).json({ error: 'Invalid task id' });
-    }
-    const result = await resolveTask(taskId, shop.sheetId);
+    if (!taskId || taskId < 1) { return res.status(400).json({ error: 'Invalid task id' }); }
+    const result = await resolveTask(taskId);
     console.log(`${auth.user} marked task ${taskId} as Resolved`);
     res.json(result);
   } catch (err) {
@@ -1348,666 +863,37 @@ app.post('/api/:shopId/tasks/:taskId/resolve', async (req, res) => {
   }
 });
 
-app.get('/dashboard', (req, res) => {
-  const auth = checkDashboardAuth(req);
-  if (!auth.ok) {
-    return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+app.get('/api/:shopId/data-quality', async (req, res) => {
+  try {
+    const auth = checkDashboardAuth(req);
+    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
+    const shop = getShop(req.params.shopId);
+    const report = await getBookingsWithIssues();
+    res.json({ shop: shop.name, ...report, updatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error('Data quality API error:', err.message);
+    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
+    res.status(status).json({ error: err.message });
   }
-  const token = req.query.token || '';
-  res.send(`<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>TOH RentalBot Dashboard</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  body { font-family: -apple-system, sans-serif; background:#0f0f10; color:#eee; margin:0; padding:20px; }
-  h1 { font-size:20px; margin-bottom:4px; }
-  .updated { color:#888; font-size:12px; margin-bottom:20px; }
-  .grid { display:grid; grid-template-columns: 1fr 1fr; gap:20px; }
-  @media (max-width:800px) { .grid { grid-template-columns: 1fr; } }
-  .card { background:#1a1a1c; border-radius:10px; padding:16px; }
-  .card h2 { font-size:15px; margin:0 0 10px; color:#ccc; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  th, td { text-align:left; padding:6px 4px; border-bottom:1px solid #2a2a2c; }
-  th { color:#888; font-weight:500; }
-  .stat { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid #2a2a2c; font-size:14px; }
-  .stat:last-child { border-bottom:none; }
-  .empty { color:#666; font-size:13px; padding:8px 0; }
-</style>
-</head>
-<body>
-  <h1>TOH RentalBot Dashboard</h1>
-  <div class="updated" id="updated">Loading...</div>
-  <div class="grid">
-    <div class="card"><h2>Recent bookings</h2><div id="bookings">Loading...</div></div>
-    <div class="card"><h2>Recent contract photos</h2><div id="photos">Loading...</div></div>
-    <div class="card"><h2>Fleet availability</h2><div id="fleet">Loading...</div></div>
-    <div class="card"><h2>Finance summary</h2><div id="finance">Loading...</div></div>
-  </div>
-<script>
-  const TOKEN = ${JSON.stringify(token)};
-  async function load() {
-    try {
-      const res = await fetch('/api/dashboard-data' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
-      const data = await res.json();
-      if (data.error) { document.getElementById('updated').textContent = data.error; return; }
-      document.getElementById('updated').textContent = 'Updated ' + new Date(data.updatedAt).toLocaleTimeString();
-
-      document.getElementById('bookings').innerHTML = data.bookings.length ? '<table><tr><th>Name</th><th>Bike</th><th>Dates</th><th>Price</th></tr>' +
-        data.bookings.map(b => \`<tr><td>\${b.name}</td><td>\${b.bike}</td><td>\${b.startDate} - \${b.endDate}</td><td>\${b.price}</td></tr>\`).join('') + '</table>'
-        : '<div class="empty">No bookings yet</div>';
-
-      document.getElementById('photos').innerHTML = data.photos.length ? '<table><tr><th>From</th><th>Time</th></tr>' +
-        data.photos.map(p => \`<tr><td>+\${p.from}</td><td>\${p.date}</td></tr>\`).join('') + '</table>'
-        : '<div class="empty">No photos yet</div>';
-
-      const fleetRows = Object.entries(data.fleet).map(([type, v]) => \`<div class="stat"><span>\${type}</span><span>\${v.available}/\${v.total}</span></div>\`).join('');
-      document.getElementById('fleet').innerHTML = fleetRows || '<div class="empty">No fleet data</div>';
-
-      document.getElementById('finance').innerHTML = data.finance ?
-        \`<div class="stat"><span>Income</span><span>\${data.finance.income.toLocaleString()} THB</span></div>
-         <div class="stat"><span>Expenses</span><span>\${data.finance.expense.toLocaleString()} THB</span></div>
-         <div class="stat"><span>Net</span><span>\${data.finance.net.toLocaleString()} THB</span></div>\`
-        : '<div class="empty">No finance data</div>';
-    } catch (err) {
-      document.getElementById('updated').textContent = 'Error loading data';
-    }
-  }
-  load();
-  setInterval(load, 5000);
-</script>
-</body>
-</html>`);
 });
 
-app.get('/motorbikes', (req, res) => {
-  const auth = checkDashboardAuth(req);
-  if (!auth.ok) {
-    return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+app.get('/api/:shopId/rental-history', async (req, res) => {
+  try {
+    const auth = checkDashboardAuth(req);
+    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
+    const shop = getShop(req.params.shopId);
+    const history = await getAllRentalHistory();
+    res.json({ shop: shop.name, history, updatedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error('Rental history API error:', err.message);
+    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
+    res.status(status).json({ error: err.message });
   }
-  const token = req.query.token || '';
-  res.send(`<!DOCTYPE html><html class="light" lang="en"><head>
-<meta charset="utf-8">
-<meta content="width=device-width, initial-scale=1.0" name="viewport">
-<title>Motorbikes Inventory - TOH Rental</title>
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com" rel="preconnect">
-<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
-<script id="tailwind-config">
-  tailwind.config = {
-    darkMode: "class",
-    theme: { extend: {
-      "colors": {
-        "outline-variant": "#c1c6d7", "background": "#faf8ff", "surface-container": "#eaedff",
-        "primary-container": "#0070eb", "surface-bright": "#faf8ff", "on-surface-variant": "#414755",
-        "surface-container-low": "#f2f3ff", "on-background": "#131b2e", "surface-container-lowest": "#ffffff",
-        "outline": "#717786", "secondary-container": "#d5e3fd", "on-surface": "#131b2e",
-        "surface": "#faf8ff", "surface-tint": "#005bc1", "secondary": "#515f74",
-        "surface-container-high": "#e2e7ff", "surface-container-highest": "#dae2fd",
-        "primary": "#0058bc", "on-primary": "#ffffff", "on-primary-container": "#fefcff",
-        "on-secondary-container": "#57657b", "error": "#ba1a1a"
-      },
-      "borderRadius": { "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem" },
-      "spacing": { "gutter": "16px", "md": "16px", "xs": "8px", "base": "4px", "margin-mobile": "16px", "margin-desktop": "32px", "sm": "12px", "xl": "32px", "lg": "24px" },
-      "fontFamily": { "status-badge": ["Inter"], "headline-md": ["Inter"], "body-md": ["Inter"], "body-lg": ["Inter"], "label-caps": ["JetBrains Mono"], "headline-lg": ["Inter"] },
-      "fontSize": {
-        "status-badge": ["12px", { "lineHeight": "12px", "fontWeight": "700" }],
-        "headline-md": ["20px", { "lineHeight": "28px", "fontWeight": "600" }],
-        "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
-        "label-caps": ["12px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600" }],
-        "headline-lg": ["24px", { "lineHeight": "32px", "fontWeight": "600" }]
-      }
-    } }
-  }
-</script>
-<style>
-  .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
-  .no-scrollbar::-webkit-scrollbar { display: none; }
-  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-  body { min-height: max(884px, 100dvh); }
-</style>
-</head>
-<body class="bg-surface text-on-surface font-body-md min-h-screen flex flex-col md:flex-row">
-<header class="flex justify-between items-center w-full px-margin-mobile h-16 z-50 bg-surface border-b border-outline-variant md:hidden sticky top-0">
-<h1 class="font-headline-lg text-headline-lg font-bold text-primary tracking-tight">TOH Rental</h1>
-</header>
-<aside class="hidden md:flex flex-col h-full py-lg gap-xs bg-surface border-r border-outline-variant fixed left-0 top-0 w-[280px] z-40 overflow-y-auto no-scrollbar">
-<div class="px-4 mb-6">
-<h1 class="font-headline-md text-headline-md text-primary mb-6">TOH Rental</h1>
-</div>
-<nav class="flex flex-col gap-2">
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/overview?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">dashboard</span>
-<span class="font-label-caps text-label-caps">Overview</span>
-</a>
-<a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
-<span class="material-symbols-outlined">two_wheeler</span>
-<span class="font-label-caps text-label-caps">Motorbikes</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rentals?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">receipt_long</span>
-<span class="font-label-caps text-label-caps">Rentals</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/ai-tasks?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">smart_toy</span>
-<span class="font-label-caps text-label-caps">AI Tasks</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/data-quality?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">fact_check</span>
-<span class="font-label-caps text-label-caps">Data Quality</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rental-history?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">history</span>
-<span class="font-label-caps text-label-caps">Rental History</span>
-</a>
-</nav>
-</aside>
-<main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
-<header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0">
-<h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Motorbike Inventory</h2>
-</header>
-<div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6">
-<div id="grid-view">
-<div class="flex flex-col md:flex-row gap-4 mb-6">
-<div class="relative flex-1">
-<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline">search</span>
-<input id="search-input" class="w-full pl-10 pr-4 py-3 bg-surface-container-lowest border border-outline-variant rounded-xl focus:outline-none focus:ring-2 focus:ring-primary font-body-md text-body-md" placeholder="Search by model, plate, or status..." type="text">
-</div>
-<div id="filter-bar" class="flex gap-2 overflow-x-auto no-scrollbar pb-2 md:pb-0">
-<button data-filter="all" class="filter-btn whitespace-nowrap px-4 py-2 bg-primary text-on-primary rounded-full font-label-caps text-label-caps border border-primary">All</button>
-<button data-filter="available" class="filter-btn whitespace-nowrap px-4 py-2 bg-surface-container-lowest text-on-surface rounded-full font-label-caps text-label-caps border border-outline-variant">Available</button>
-<button data-filter="rented" class="filter-btn whitespace-nowrap px-4 py-2 bg-surface-container-lowest text-on-surface rounded-full font-label-caps text-label-caps border border-outline-variant">Rented</button>
-</div>
-</div>
-<div id="bike-grid" class="grid grid-cols-1 xl:grid-cols-2 gap-4">
-<div class="text-on-surface-variant">Loading fleet...</div>
-</div>
-</div>
-<div id="history-view" class="hidden">
-<button id="back-to-grid-btn" class="flex items-center gap-2 text-primary font-label-caps text-label-caps mb-4 hover:underline">
-  <span class="material-symbols-outlined text-[18px]">arrow_back</span> Back to Motorbikes
-</button>
-<div id="history-body">Loading...</div>
-</div>
-<div id="details-view" class="hidden">
-<button id="back-from-details-btn" class="flex items-center gap-2 text-primary font-label-caps text-label-caps mb-4 hover:underline">
-  <span class="material-symbols-outlined text-[18px]">arrow_back</span> Back to Motorbikes
-</button>
-<div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6 max-w-lg">
-  <h3 id="details-title" class="font-headline-md text-headline-md font-semibold text-on-surface mb-4"></h3>
-  <form id="details-form" class="flex flex-col gap-4">
-    <div>
-      <label class="font-label-caps text-label-caps text-on-surface-variant block mb-1">Renter Name</label>
-      <input id="details-renter-name" type="text" class="w-full px-3 py-2 bg-surface border border-outline-variant rounded-lg font-body-md text-body-md">
-    </div>
-    <div>
-      <label class="font-label-caps text-label-caps text-on-surface-variant block mb-1">Phone</label>
-      <input id="details-renter-phone" type="text" class="w-full px-3 py-2 bg-surface border border-outline-variant rounded-lg font-body-md text-body-md">
-    </div>
-    <div class="grid grid-cols-2 gap-4">
-      <div>
-        <label class="font-label-caps text-label-caps text-on-surface-variant block mb-1">Rent Date</label>
-        <input id="details-rent-date" type="date" class="w-full px-3 py-2 bg-surface border border-outline-variant rounded-lg font-body-md text-body-md">
-      </div>
-      <div>
-        <label class="font-label-caps text-label-caps text-on-surface-variant block mb-1">Expected Return</label>
-        <input id="details-expected-return" type="date" class="w-full px-3 py-2 bg-surface border border-outline-variant rounded-lg font-body-md text-body-md">
-      </div>
-    </div>
-    <div>
-      <label class="font-label-caps text-label-caps text-on-surface-variant block mb-1">Price (THB, optional)</label>
-      <input id="details-price" type="number" class="w-full px-3 py-2 bg-surface border border-outline-variant rounded-lg font-body-md text-body-md" placeholder="e.g. 1200">
-    </div>
-    <button type="submit" id="details-submit-btn" class="px-4 py-2 bg-primary text-on-primary rounded-lg font-label-caps text-label-caps hover:bg-surface-tint transition-colors">Mark Rented</button>
-  </form>
-</div>
-</div>
-</div>
-</main>
-<script>
-  const TOKEN = ${JSON.stringify(token)};
-  let ALL_BIKES = [];
-  let activeFilter = 'all';
-
-  function badgeClasses(status) {
-    const s = (status || '').toLowerCase();
-    if (s === 'rented') return 'bg-blue-100 text-blue-800 border-blue-200';
-    if (s === 'maintenance') return 'bg-amber-100 text-amber-800 border-amber-200';
-    return 'bg-green-100 text-green-800 border-green-200';
-  }
-
-  function bikeCard(b) {
-    const badge = badgeClasses(b.status);
-    const isRented = (b.status || '').toLowerCase() === 'rented';
-    const extra = isRented
-      ? \`<div class="mt-3 bg-surface-container-low p-2 rounded border border-outline-variant/50">
-           <p class="font-body-md text-body-md"><span class="font-semibold">Renter:</span> \${b.renterName || '-'}</p>
-           <p class="font-body-md text-body-md text-on-surface-variant mt-1">Expected return: \${b.expectedReturn || '-'}</p>
-         </div>\`
-      : '';
-    const actionLabel = isRented ? 'Mark Returned' : 'Mark Rented';
-    const newStatus = isRented ? 'Available' : 'Rented';
-    const bikeIdAttr = b.bikeId.replace(/"/g, '&quot;');
-    return \`<article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col gap-3 hover:shadow-md transition-shadow">
-      <div class="flex justify-between items-start">
-        <button class="view-history-btn text-left" data-bike-id="\${bikeIdAttr}">
-          <h3 class="font-headline-md text-headline-md text-on-surface font-semibold hover:text-primary transition-colors">\${b.model || b.bikeId}</h3>
-          <p class="font-label-caps text-label-caps text-on-surface-variant mt-1">\${b.bikeId}\${b.color ? ' • ' + b.color : ''}</p>
-        </button>
-        <div class="px-3 py-1 rounded-full font-status-badge text-status-badge uppercase border \${badge}">\${b.status || 'Available'}</div>
-      </div>
-      \${extra}
-      <div class="mt-1 flex gap-2">
-        <div class="status-action flex-1" data-bike-id="\${bikeIdAttr}">
-          <button class="update-status-btn w-full px-4 py-2 bg-primary text-on-primary rounded-lg font-label-caps text-label-caps hover:bg-surface-tint transition-colors" data-bike-id="\${bikeIdAttr}" data-new-status="\${newStatus}">\${actionLabel}</button>
-        </div>
-        <button class="view-history-btn px-4 py-2 bg-surface-container-lowest text-on-surface rounded-lg font-label-caps text-label-caps border border-outline-variant hover:bg-surface-container-high transition-colors" data-bike-id="\${bikeIdAttr}">History</button>
-      </div>
-    </article>\`;
-  }
-
-  function renderBikes() {
-    const grid = document.getElementById('bike-grid');
-    const query = document.getElementById('search-input').value.trim().toLowerCase();
-    let filtered = ALL_BIKES.filter(b => {
-      const status = (b.status || 'available').toLowerCase();
-      if (activeFilter === 'available' && status !== 'available' && status !== '') return false;
-      if (activeFilter === 'rented' && status !== 'rented') return false;
-      if (query) {
-        const haystack = \`\${b.bikeId} \${b.model} \${b.status}\`.toLowerCase();
-        if (!haystack.includes(query)) return false;
-      }
-      return true;
-    });
-    grid.innerHTML = filtered.length
-      ? filtered.map(bikeCard).join('')
-      : '<div class="text-on-surface-variant">No bikes match.</div>';
-  }
-
-  document.querySelectorAll('.filter-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      activeFilter = btn.dataset.filter;
-      document.querySelectorAll('.filter-btn').forEach(b => {
-        b.classList.remove('bg-primary', 'text-on-primary', 'border-primary');
-        b.classList.add('bg-surface-container-lowest', 'text-on-surface', 'border-outline-variant');
-      });
-      btn.classList.remove('bg-surface-container-lowest', 'text-on-surface', 'border-outline-variant');
-      btn.classList.add('bg-primary', 'text-on-primary', 'border-primary');
-      renderBikes();
-    });
-  });
-  document.getElementById('search-input').addEventListener('input', renderBikes);
-
-  document.getElementById('bike-grid').addEventListener('click', async (e) => {
-    const historyBtn = e.target.closest('.view-history-btn');
-    if (historyBtn) {
-      openHistoryModal(historyBtn.dataset.bikeId);
-      return;
-    }
-
-    // Clicking "Mark Rented" reveals two choices in place of the button
-    // instead of acting immediately.
-    const btn = e.target.closest('.update-status-btn');
-    if (btn && btn.dataset.newStatus === 'Rented') {
-      const wrapper = btn.closest('.status-action');
-      wrapper.innerHTML = \`
-        <div class="flex gap-2">
-          <button class="quick-mark-btn flex-1 px-3 py-2 bg-primary text-on-primary rounded-lg font-label-caps text-label-caps" data-bike-id="\${btn.dataset.bikeId}">Quick Mark</button>
-          <button class="enter-details-btn flex-1 px-3 py-2 bg-surface-container-lowest text-on-surface rounded-lg font-label-caps text-label-caps border border-outline-variant" data-bike-id="\${btn.dataset.bikeId}">Enter Details</button>
-          <button class="cancel-choice-btn px-2 text-on-surface-variant"><span class="material-symbols-outlined text-[18px]">close</span></button>
-        </div>\`;
-      return;
-    }
-
-    const cancelBtn = e.target.closest('.cancel-choice-btn');
-    if (cancelBtn) {
-      renderBikes(); // resets all cards back to normal, cheap and safe
-      return;
-    }
-
-    const quickBtn = e.target.closest('.quick-mark-btn');
-    if (quickBtn) {
-      await submitStatusUpdate(quickBtn, quickBtn.dataset.bikeId, 'Rented', {});
-      return;
-    }
-
-    const detailsBtn = e.target.closest('.enter-details-btn');
-    if (detailsBtn) {
-      openDetailsView(detailsBtn.dataset.bikeId);
-      return;
-    }
-
-    // Mark Returned — unchanged, still just asks for a price via prompt.
-    if (btn && btn.dataset.newStatus === 'Available') {
-      const entered = prompt('Price received for this rental (THB)? Leave blank to skip.');
-      if (entered === null) return; // cancelled
-      await submitStatusUpdate(btn, btn.dataset.bikeId, 'Available', { price: entered.trim() });
-    }
-  });
-
-  async function submitStatusUpdate(btn, bikeId, status, extra) {
-    const originalLabel = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Updating...';
-    try {
-      const res = await fetch('/api/toh/motorbikes/' + encodeURIComponent(bikeId) + '/status' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status, ...extra })
-      });
-      const data = await res.json();
-      if (data.error) {
-        alert(data.error);
-        renderBikes();
-        return;
-      }
-      await loadBikes();
-    } catch (err) {
-      alert('Failed to update status');
-      renderBikes();
-    }
-  }
-
-  let detailsTargetBikeId = null;
-  function toDMY(isoDate) {
-    if (!isoDate) return '';
-    const [y, m, d] = isoDate.split('-');
-    return \`\${d}/\${m}/\${y}\`;
-  }
-
-  function openDetailsView(bikeId) {
-    detailsTargetBikeId = bikeId;
-    const bike = ALL_BIKES.find(b => b.bikeId === bikeId);
-    document.getElementById('details-title').textContent = (bike ? bike.model + ' \u2014 ' + bike.bikeId : bikeId);
-    document.getElementById('details-renter-name').value = '';
-    document.getElementById('details-renter-phone').value = '';
-    document.getElementById('details-rent-date').value = new Date().toISOString().slice(0, 10);
-    document.getElementById('details-expected-return').value = '';
-    document.getElementById('details-price').value = '';
-    document.getElementById('grid-view').classList.add('hidden');
-    document.getElementById('details-view').classList.remove('hidden');
-  }
-
-  document.getElementById('back-from-details-btn').addEventListener('click', () => {
-    document.getElementById('details-view').classList.add('hidden');
-    document.getElementById('grid-view').classList.remove('hidden');
-    renderBikes();
-  });
-
-  document.getElementById('details-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const submitBtn = document.getElementById('details-submit-btn');
-    submitBtn.disabled = true;
-    submitBtn.textContent = 'Saving...';
-    try {
-      const res = await fetch('/api/toh/motorbikes/' + encodeURIComponent(detailsTargetBikeId) + '/status' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          status: 'Rented',
-          renterName: document.getElementById('details-renter-name').value,
-          renterPhone: document.getElementById('details-renter-phone').value,
-          rentedDate: toDMY(document.getElementById('details-rent-date').value),
-          expectedReturn: toDMY(document.getElementById('details-expected-return').value),
-          price: document.getElementById('details-price').value,
-        })
-      });
-      const data = await res.json();
-      if (data.error) {
-        alert(data.error);
-        submitBtn.disabled = false;
-        submitBtn.textContent = 'Mark Rented';
-        return;
-      }
-      document.getElementById('details-view').classList.add('hidden');
-      document.getElementById('grid-view').classList.remove('hidden');
-      await loadBikes();
-    } catch (err) {
-      alert('Failed to save details');
-      submitBtn.disabled = false;
-      submitBtn.textContent = 'Mark Rented';
-    }
-  });
-
-  async function openHistoryModal(bikeId) {
-    document.getElementById('grid-view').classList.add('hidden');
-    document.getElementById('history-view').classList.remove('hidden');
-    const body = document.getElementById('history-body');
-    body.innerHTML = 'Loading...';
-    try {
-      const res = await fetch('/api/toh/motorbikes/' + encodeURIComponent(bikeId) + '/history' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
-      const data = await res.json();
-      if (data.error) {
-        body.innerHTML = '<div class="text-error">' + data.error + '</div>';
-        return;
-      }
-      const b = data.bike;
-      const isRented = (b.status || '').toLowerCase() === 'rented';
-      const badge = isRented ? 'bg-blue-100 text-blue-800 border-blue-200' : 'bg-green-100 text-green-800 border-green-200';
-
-      const historyRows = data.history.length
-        ? data.history.map(h => \`
-          <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col gap-1">
-            <div class="flex justify-between items-center">
-              <span class="font-semibold text-on-surface">\${h.renterName || 'Unknown renter'}</span>
-              <span class="font-semibold text-primary">\${h.price ? h.price + ' THB' : 'No price logged'}</span>
-            </div>
-            <div class="text-sm text-on-surface-variant">\${h.startDate || '-'} \u2192 \${h.endDate || '-'} &middot; \${h.days || '?'} days</div>
-            \${h.renterPhone ? \`<div class="text-sm text-on-surface-variant">\${h.renterPhone}</div>\` : ''}
-          </div>\`).join('')
-        : '<div class="text-on-surface-variant text-sm py-8 text-center">No rental history logged yet for this bike.</div>';
-
-      body.innerHTML = \`
-        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6 mb-6">
-          <h3 class="font-headline-lg text-headline-lg font-semibold text-on-surface">\${b.model || b.bikeId}</h3>
-          <p class="font-label-caps text-label-caps text-on-surface-variant mt-1 mb-4">\${b.bikeId}\${b.color ? ' • ' + b.color : ''}</p>
-          <div class="flex items-center gap-4 text-sm">
-            <span class="px-3 py-1 rounded-full font-status-badge text-status-badge uppercase border \${badge}">\${b.status || 'Available'}</span>
-            <span class="text-on-surface-variant">Location: \${b.location || '-'}</span>
-          </div>
-        </div>
-        <h4 class="font-semibold text-on-surface mb-3">Rental History</h4>
-        <div class="flex flex-col gap-3">\${historyRows}</div>
-      \`;
-    } catch (err) {
-      body.innerHTML = '<div class="text-error">Failed to load bike details</div>';
-    }
-  }
-
-  document.getElementById('back-to-grid-btn').addEventListener('click', () => {
-    document.getElementById('history-view').classList.add('hidden');
-    document.getElementById('grid-view').classList.remove('hidden');
-  });
-
-  async function loadBikes() {
-    try {
-      const res = await fetch('/api/toh/motorbikes' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
-      const data = await res.json();
-      if (data.error) {
-        document.getElementById('bike-grid').innerHTML = '<div class="text-error">' + data.error + '</div>';
-        return;
-      }
-      ALL_BIKES = data.bikes;
-      renderBikes();
-    } catch (err) {
-      document.getElementById('bike-grid').innerHTML = '<div class="text-error">Failed to load fleet data</div>';
-    }
-  }
-  loadBikes();
-</script>
-</body></html>`);
-});
-
-app.get('/rentals', (req, res) => {
-  const auth = checkDashboardAuth(req);
-  if (!auth.ok) {
-    return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
-  }
-  const token = req.query.token || '';
-  res.send(`<!DOCTYPE html><html class="light" lang="en"><head>
-<meta charset="utf-8">
-<meta content="width=device-width, initial-scale=1.0" name="viewport">
-<title>Rentals - TOH Rental</title>
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com" rel="preconnect">
-<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
-<script id="tailwind-config">
-  tailwind.config = {
-    darkMode: "class",
-    theme: { extend: {
-      "colors": {
-        "outline-variant": "#c1c6d7", "background": "#faf8ff", "surface-container": "#eaedff",
-        "primary-container": "#0070eb", "surface-bright": "#faf8ff", "on-surface-variant": "#414755",
-        "surface-container-low": "#f2f3ff", "on-background": "#131b2e", "surface-container-lowest": "#ffffff",
-        "outline": "#717786", "secondary-container": "#d5e3fd", "on-surface": "#131b2e",
-        "surface": "#faf8ff", "surface-tint": "#005bc1", "secondary": "#515f74",
-        "surface-container-high": "#e2e7ff", "surface-container-highest": "#dae2fd",
-        "primary": "#0058bc", "on-primary": "#ffffff", "on-primary-container": "#fefcff",
-        "on-secondary-container": "#57657b", "error": "#ba1a1a"
-      },
-      "borderRadius": { "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem" },
-      "spacing": { "gutter": "16px", "md": "16px", "xs": "8px", "base": "4px", "margin-mobile": "16px", "margin-desktop": "32px", "sm": "12px", "xl": "32px", "lg": "24px" },
-      "fontFamily": { "status-badge": ["Inter"], "headline-md": ["Inter"], "body-md": ["Inter"], "body-lg": ["Inter"], "label-caps": ["JetBrains Mono"], "headline-lg": ["Inter"] },
-      "fontSize": {
-        "status-badge": ["12px", { "lineHeight": "12px", "fontWeight": "700" }],
-        "headline-md": ["20px", { "lineHeight": "28px", "fontWeight": "600" }],
-        "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
-        "label-caps": ["12px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600" }],
-        "headline-lg": ["24px", { "lineHeight": "32px", "fontWeight": "600" }]
-      }
-    } }
-  }
-</script>
-<style>
-  .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
-  .no-scrollbar::-webkit-scrollbar { display: none; }
-  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-  body { min-height: max(884px, 100dvh); }
-</style>
-</head>
-<body class="bg-surface text-on-surface font-body-md min-h-screen flex flex-col md:flex-row">
-<header class="flex justify-between items-center w-full px-margin-mobile h-16 z-50 bg-surface border-b border-outline-variant md:hidden sticky top-0">
-<h1 class="font-headline-lg text-headline-lg font-bold text-primary tracking-tight">TOH Rental</h1>
-</header>
-<aside class="hidden md:flex flex-col h-full py-lg gap-xs bg-surface border-r border-outline-variant fixed left-0 top-0 w-[280px] z-40 overflow-y-auto no-scrollbar">
-<div class="px-4 mb-6">
-<h1 class="font-headline-md text-headline-md text-primary mb-6">TOH Rental</h1>
-</div>
-<nav class="flex flex-col gap-2">
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/overview?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">dashboard</span>
-<span class="font-label-caps text-label-caps">Overview</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/motorbikes?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">two_wheeler</span>
-<span class="font-label-caps text-label-caps">Motorbikes</span>
-</a>
-<a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
-<span class="material-symbols-outlined">receipt_long</span>
-<span class="font-label-caps text-label-caps">Rentals</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/ai-tasks?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">smart_toy</span>
-<span class="font-label-caps text-label-caps">AI Tasks</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/data-quality?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">fact_check</span>
-<span class="font-label-caps text-label-caps">Data Quality</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rental-history?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">history</span>
-<span class="font-label-caps text-label-caps">Rental History</span>
-</a>
-</nav>
-</aside>
-<main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
-<header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0">
-<h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Rentals</h2>
-</header>
-<div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6">
-<div class="relative">
-<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline">search</span>
-<input id="search-input" class="w-full pl-10 pr-4 py-3 bg-surface-container-lowest border border-outline-variant rounded-xl focus:outline-none focus:ring-2 focus:ring-primary font-body-md text-body-md" placeholder="Search by customer, phone, or bike..." type="text">
-</div>
-<div id="rentals-list" class="flex flex-col gap-3">
-<div class="text-on-surface-variant">Loading rentals...</div>
-</div>
-</div>
-</main>
-<script>
-  const TOKEN = ${JSON.stringify(token)};
-  let ALL_BOOKINGS = [];
-
-  function rentalCard(b) {
-    return \`<article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6">
-      <div class="w-10 h-10 rounded bg-surface-container flex items-center justify-center shrink-0 text-on-surface-variant">
-        <span class="material-symbols-outlined text-[20px]">two_wheeler</span>
-      </div>
-      <div class="flex-1 grid grid-cols-1 sm:grid-cols-4 gap-2 sm:gap-4">
-        <div>
-          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Customer</p>
-          <p class="font-body-md text-on-surface font-semibold">\${b.name || '-'}</p>
-          <p class="font-body-md text-on-surface-variant text-sm">\${b.phone || '-'}</p>
-        </div>
-        <div>
-          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Bike</p>
-          <p class="font-body-md text-on-surface">\${b.bike || '-'}</p>
-        </div>
-        <div>
-          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Dates</p>
-          <p class="font-body-md text-on-surface">\${b.startDate || '-'} → \${b.endDate || '-'}</p>
-          <p class="font-body-md text-on-surface-variant text-sm">\${b.location || '-'}</p>
-        </div>
-        <div>
-          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Price</p>
-          <p class="font-body-md text-on-surface font-semibold">\${b.price || '-'}</p>
-          <p class="font-body-md text-on-surface-variant text-sm">\${b.date || ''}</p>
-        </div>
-      </div>
-    </article>\`;
-  }
-
-  function renderRentals() {
-    const list = document.getElementById('rentals-list');
-    const query = document.getElementById('search-input').value.trim().toLowerCase();
-    let filtered = ALL_BOOKINGS;
-    if (query) {
-      filtered = ALL_BOOKINGS.filter(b => \`\${b.name} \${b.phone} \${b.bike}\`.toLowerCase().includes(query));
-    }
-    list.innerHTML = filtered.length ? filtered.map(rentalCard).join('') : '<div class="text-on-surface-variant">No rentals match.</div>';
-  }
-
-  document.getElementById('search-input').addEventListener('input', renderRentals);
-
-  async function loadRentals() {
-    try {
-      const res = await fetch('/api/toh/rentals' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
-      const data = await res.json();
-      if (data.error) {
-        document.getElementById('rentals-list').innerHTML = '<div class="text-error">' + data.error + '</div>';
-        return;
-      }
-      ALL_BOOKINGS = data.bookings;
-      renderRentals();
-    } catch (err) {
-      document.getElementById('rentals-list').innerHTML = '<div class="text-error">Failed to load rentals</div>';
-    }
-  }
-  loadRentals();
-</script>
-</body></html>`);
 });
 
 app.get('/overview', (req, res) => {
   const auth = checkDashboardAuth(req);
-  if (!auth.ok) {
-    return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
-  }
+  if (!auth.ok) { return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.'); }
   const token = req.query.token || '';
   res.send(`<!DOCTYPE html><html class="light" lang="en"><head>
 <meta charset="utf-8">
@@ -2078,7 +964,7 @@ app.get('/overview', (req, res) => {
 <span class="font-label-caps text-label-caps">AI Tasks</span>
 </a>
 <a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/data-quality?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">fact_check</span>
+<span class="material-symbols-outlined">verified</span>
 <span class="font-label-caps text-label-caps">Data Quality</span>
 </a>
 <a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rental-history?token=${encodeURIComponent(token)}">
@@ -2092,602 +978,40 @@ app.get('/overview', (req, res) => {
 <h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Overview</h2>
 </header>
 <div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6">
-<div id="stat-cards" class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-  <div class="text-on-surface-variant col-span-full">Loading dashboard...</div>
+<div class="grid grid-cols-2 md:grid-cols-4 gap-4" id="stats"></div>
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+<div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6">
+<h3 class="font-headline-md text-headline-md mb-4">Recent Rentals</h3>
+<div id="recentBookings" class="text-on-surface-variant text-sm space-y-3"></div>
 </div>
-<div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4">
-  <h3 class="font-headline-md text-headline-md text-on-surface font-semibold mb-3">Recent bookings</h3>
-  <div id="recent-list" class="flex flex-col gap-2">
-    <div class="text-on-surface-variant">Loading...</div>
-  </div>
-</div>
-</div>
-</main>
-<script>
-  const TOKEN = ${JSON.stringify(token)};
-
-  function statCard(label, value, icon) {
-    return \`<div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col gap-1">
-      <div class="flex items-center gap-2 text-on-surface-variant">
-        <span class="material-symbols-outlined text-[18px]">\${icon}</span>
-        <span class="font-label-caps text-label-caps">\${label}</span>
-      </div>
-      <span class="font-headline-lg text-headline-lg text-on-surface font-semibold">\${value}</span>
-    </div>\`;
-  }
-
-  function recentRow(b) {
-    return \`<div class="flex flex-col sm:flex-row sm:items-center justify-between gap-1 py-2 border-b border-outline-variant/50 last:border-0">
-      <div>
-        <span class="font-body-md text-on-surface font-semibold">\${b.name || '-'}</span>
-        <span class="font-body-md text-on-surface-variant"> · \${b.bike || '-'}</span>
-      </div>
-      <span class="font-body-md text-on-surface-variant">\${b.price || '-'}</span>
-    </div>\`;
-  }
-
-  async function loadOverview() {
-    try {
-      const res = await fetch('/api/toh/dashboard' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
-      const data = await res.json();
-      if (data.error) {
-        document.getElementById('stat-cards').innerHTML = '<div class="text-error col-span-full">' + data.error + '</div>';
-        return;
-      }
-      document.getElementById('stat-cards').innerHTML = [
-        statCard('Bikes Available', data.fleet.available + ' / ' + data.fleet.total, 'two_wheeler'),
-        statCard('Bikes Rented', data.fleet.rented, 'schedule'),
-        statCard('Total Bookings', data.bookings.totalCount, 'receipt_long'),
-        statCard('Revenue (clean rows)', data.bookings.totalRevenue.toLocaleString() + ' THB', 'payments'),
-      ].join('');
-
-      document.getElementById('recent-list').innerHTML = data.recentBookings.length
-        ? data.recentBookings.map(recentRow).join('')
-        : '<div class="text-on-surface-variant">No bookings yet</div>';
-
-      if (data.bookings.skippedBookingCount > 0) {
-        document.getElementById('recent-list').innerHTML += '<div class="text-on-surface-variant text-sm mt-2">' +
-          data.bookings.skippedBookingCount + ' older booking(s) skipped from revenue due to messy price data.</div>';
-      }
-    } catch (err) {
-      document.getElementById('stat-cards').innerHTML = '<div class="text-error col-span-full">Failed to load dashboard data</div>';
-    }
-  }
-  loadOverview();
-</script>
-</body></html>`);
-});
-
-app.get('/ai-tasks', (req, res) => {
-  const auth = checkDashboardAuth(req);
-  if (!auth.ok) {
-    return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
-  }
-  const token = req.query.token || '';
-  res.send(`<!DOCTYPE html><html class="light" lang="en"><head>
-<meta charset="utf-8">
-<meta content="width=device-width, initial-scale=1.0" name="viewport">
-<title>AI Task Queue - TOH Rental</title>
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com" rel="preconnect">
-<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
-<script id="tailwind-config">
-  tailwind.config = {
-    darkMode: "class",
-    theme: { extend: {
-      "colors": {
-        "outline-variant": "#c1c6d7", "background": "#faf8ff", "surface-container": "#eaedff",
-        "primary-container": "#0070eb", "surface-bright": "#faf8ff", "on-surface-variant": "#414755",
-        "surface-container-low": "#f2f3ff", "on-background": "#131b2e", "surface-container-lowest": "#ffffff",
-        "outline": "#717786", "secondary-container": "#d5e3fd", "on-surface": "#131b2e",
-        "surface": "#faf8ff", "surface-tint": "#005bc1", "secondary": "#515f74",
-        "surface-container-high": "#e2e7ff", "surface-container-highest": "#dae2fd",
-        "primary": "#0058bc", "on-primary": "#ffffff", "on-primary-container": "#fefcff",
-        "on-secondary-container": "#57657b", "error": "#ba1a1a"
-      },
-      "borderRadius": { "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem" },
-      "spacing": { "gutter": "16px", "md": "16px", "xs": "8px", "base": "4px", "margin-mobile": "16px", "margin-desktop": "32px", "sm": "12px", "xl": "32px", "lg": "24px" },
-      "fontFamily": { "status-badge": ["Inter"], "headline-md": ["Inter"], "body-md": ["Inter"], "body-lg": ["Inter"], "label-caps": ["JetBrains Mono"], "headline-lg": ["Inter"] },
-      "fontSize": {
-        "status-badge": ["12px", { "lineHeight": "12px", "fontWeight": "700" }],
-        "headline-md": ["20px", { "lineHeight": "28px", "fontWeight": "600" }],
-        "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
-        "label-caps": ["12px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600" }],
-        "headline-lg": ["24px", { "lineHeight": "32px", "fontWeight": "600" }]
-      }
-    } }
-  }
-</script>
-<style>
-  .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
-  .no-scrollbar::-webkit-scrollbar { display: none; }
-  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-  body { min-height: max(884px, 100dvh); }
-</style>
-</head>
-<body class="bg-surface text-on-surface font-body-md min-h-screen flex flex-col md:flex-row">
-<header class="flex justify-between items-center w-full px-margin-mobile h-16 z-50 bg-surface border-b border-outline-variant md:hidden sticky top-0">
-<h1 class="font-headline-lg text-headline-lg font-bold text-primary tracking-tight">TOH Rental</h1>
-</header>
-<aside class="hidden md:flex flex-col h-full py-lg gap-xs bg-surface border-r border-outline-variant fixed left-0 top-0 w-[280px] z-40 overflow-y-auto no-scrollbar">
-<div class="px-4 mb-6">
-<h1 class="font-headline-md text-headline-md text-primary mb-6">TOH Rental</h1>
-</div>
-<nav class="flex flex-col gap-2">
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/overview?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">dashboard</span>
-<span class="font-label-caps text-label-caps">Overview</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/motorbikes?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">two_wheeler</span>
-<span class="font-label-caps text-label-caps">Motorbikes</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rentals?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">receipt_long</span>
-<span class="font-label-caps text-label-caps">Rentals</span>
-</a>
-<a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
-<span class="material-symbols-outlined">smart_toy</span>
-<span class="font-label-caps text-label-caps">AI Tasks</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/data-quality?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">fact_check</span>
-<span class="font-label-caps text-label-caps">Data Quality</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rental-history?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">history</span>
-<span class="font-label-caps text-label-caps">Rental History</span>
-</a>
-</nav>
-</aside>
-<main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
-<header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0">
-<h2 class="font-headline-md text-headline-md text-on-surface font-semibold">AI Task Queue</h2>
-</header>
-<div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6">
-<div id="filter-bar" class="flex gap-2 overflow-x-auto no-scrollbar pb-2 md:pb-0">
-<button data-filter="open" class="filter-btn whitespace-nowrap px-4 py-2 bg-primary text-on-primary rounded-full font-label-caps text-label-caps border border-primary">Open</button>
-<button data-filter="resolved" class="filter-btn whitespace-nowrap px-4 py-2 bg-surface-container-lowest text-on-surface rounded-full font-label-caps text-label-caps border border-outline-variant">Resolved</button>
-<button data-filter="all" class="filter-btn whitespace-nowrap px-4 py-2 bg-surface-container-lowest text-on-surface rounded-full font-label-caps text-label-caps border border-outline-variant">All</button>
-</div>
-<div id="task-list" class="flex flex-col gap-3">
-<div class="text-on-surface-variant">Loading tasks...</div>
+<div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6">
+<h3 class="font-headline-md text-headline-md mb-4">Fleet Status</h3>
+<div id="fleetStatus" class="space-y-3"></div>
 </div>
 </div>
-</main>
-<script>
-  const TOKEN = ${JSON.stringify(token)};
-  let ALL_TASKS = [];
-  let activeFilter = 'open';
-
-  function typeIcon(type) {
-    if ((type || '').toLowerCase().includes('human help')) return 'support_agent';
-    if ((type || '').toLowerCase().includes('contract')) return 'description';
-    return 'smart_toy';
-  }
-
-  function taskCard(t) {
-    const isOpen = t.status === 'Open';
-    const badge = isOpen ? 'bg-amber-100 text-amber-800 border-amber-200' : 'bg-green-100 text-green-800 border-green-200';
-    const actionBtn = isOpen
-      ? \`<button class="resolve-btn px-4 py-2 bg-primary text-on-primary rounded-lg font-label-caps text-label-caps hover:bg-surface-tint transition-colors" data-task-id="\${t.id}">Mark Resolved</button>\`
-      : \`<span class="font-body-md text-on-surface-variant text-sm">Resolved \${t.resolvedAt || ''}</span>\`;
-    return \`<article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6">
-      <div class="w-10 h-10 rounded bg-surface-container flex items-center justify-center shrink-0 text-on-surface-variant">
-        <span class="material-symbols-outlined text-[20px]">\${typeIcon(t.type)}</span>
-      </div>
-      <div class="flex-1 grid grid-cols-1 sm:grid-cols-4 gap-2 sm:gap-4">
-        <div>
-          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Type</p>
-          <p class="font-body-md text-on-surface font-semibold">\${t.type || '-'}</p>
-          <p class="font-body-md text-on-surface-variant text-sm">\${t.contact || '-'}</p>
-        </div>
-        <div class="sm:col-span-2">
-          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Details</p>
-          <p class="font-body-md text-on-surface">\${t.description || '-'}</p>
-          <p class="font-body-md text-on-surface-variant text-sm">\${t.date || ''}</p>
-        </div>
-        <div class="flex items-center justify-between sm:justify-end gap-3">
-          <div class="px-3 py-1 rounded-full font-status-badge text-status-badge uppercase border \${badge}">\${t.status}</div>
-          \${actionBtn}
-        </div>
-      </div>
-    </article>\`;
-  }
-
-  function renderTasks() {
-    const list = document.getElementById('task-list');
-    let filtered = ALL_TASKS;
-    if (activeFilter === 'open') filtered = ALL_TASKS.filter(t => t.status === 'Open');
-    else if (activeFilter === 'resolved') filtered = ALL_TASKS.filter(t => t.status === 'Resolved');
-    list.innerHTML = filtered.length ? filtered.map(taskCard).join('') : '<div class="text-on-surface-variant">No tasks match.</div>';
-  }
-
-  document.querySelectorAll('.filter-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      activeFilter = btn.dataset.filter;
-      document.querySelectorAll('.filter-btn').forEach(b => {
-        b.classList.remove('bg-primary', 'text-on-primary', 'border-primary');
-        b.classList.add('bg-surface-container-lowest', 'text-on-surface', 'border-outline-variant');
-      });
-      btn.classList.remove('bg-surface-container-lowest', 'text-on-surface', 'border-outline-variant');
-      btn.classList.add('bg-primary', 'text-on-primary', 'border-primary');
-      renderTasks();
-    });
-  });
-
-  document.getElementById('task-list').addEventListener('click', async (e) => {
-    const btn = e.target.closest('.resolve-btn');
-    if (!btn) return;
-    btn.disabled = true;
-    btn.textContent = 'Resolving...';
-    try {
-      const res = await fetch('/api/toh/tasks/' + encodeURIComponent(btn.dataset.taskId) + '/resolve' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''), {
-        method: 'POST',
-      });
-      const data = await res.json();
-      if (data.error) {
-        alert(data.error);
-        btn.disabled = false;
-        btn.textContent = 'Mark Resolved';
-        return;
-      }
-      await loadTasks();
-    } catch (err) {
-      alert('Failed to resolve task');
-      btn.disabled = false;
-      btn.textContent = 'Mark Resolved';
-    }
-  });
-
-  async function loadTasks() {
-    try {
-      const res = await fetch('/api/toh/tasks' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
-      const data = await res.json();
-      if (data.error) {
-        document.getElementById('task-list').innerHTML = '<div class="text-error">' + data.error + '</div>';
-        return;
-      }
-      ALL_TASKS = data.tasks;
-      renderTasks();
-    } catch (err) {
-      document.getElementById('task-list').innerHTML = '<div class="text-error">Failed to load tasks</div>';
-    }
-  }
-  loadTasks();
-</script>
-</body></html>`);
-});
-
-// Read-only diagnostic: lists Sheet1 rows with a messy price or
-// placeholder-looking date, so a human can fix them with the correct info.
-// Never edits anything itself.
-app.get('/api/:shopId/data-quality', async (req, res) => {
-  try {
-    const auth = checkDashboardAuth(req);
-    if (!auth.ok) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    const shop = getShop(req.params.shopId);
-    const report = await getBookingsWithIssues(shop.sheetId);
-    res.json({ shop: shop.name, ...report, updatedAt: new Date().toISOString() });
-  } catch (err) {
-    console.error('Data quality API error:', err.message);
-    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
-    res.status(status).json({ error: err.message });
-  }
-});
-
-// Returns every logged rental across all bikes for the shop, most recent
-// first — used by the /rental-history page.
-app.get('/api/:shopId/rental-history', async (req, res) => {
-  try {
-    const auth = checkDashboardAuth(req);
-    if (!auth.ok) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    const shop = getShop(req.params.shopId);
-    const history = await getAllRentalHistory(shop.fleetSheetId);
-    res.json({ shop: shop.name, history, updatedAt: new Date().toISOString() });
-  } catch (err) {
-    console.error('Rental history API error:', err.message);
-    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
-    res.status(status).json({ error: err.message });
-  }
-});
-
-app.get('/rental-history', (req, res) => {
-  const auth = checkDashboardAuth(req);
-  if (!auth.ok) {
-    return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
-  }
-  const token = req.query.token || '';
-  res.send(`<!DOCTYPE html><html class="light" lang="en"><head>
-<meta charset="utf-8">
-<meta content="width=device-width, initial-scale=1.0" name="viewport">
-<title>Rental History - TOH Rental</title>
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com" rel="preconnect">
-<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
-<script id="tailwind-config">
-  tailwind.config = {
-    darkMode: "class",
-    theme: { extend: {
-      "colors": {
-        "outline-variant": "#c1c6d7", "background": "#faf8ff", "surface-container": "#eaedff",
-        "primary-container": "#0070eb", "surface-bright": "#faf8ff", "on-surface-variant": "#414755",
-        "surface-container-low": "#f2f3ff", "on-background": "#131b2e", "surface-container-lowest": "#ffffff",
-        "outline": "#717786", "secondary-container": "#d5e3fd", "on-surface": "#131b2e",
-        "surface": "#faf8ff", "surface-tint": "#005bc1", "secondary": "#515f74",
-        "surface-container-high": "#e2e7ff", "surface-container-highest": "#dae2fd",
-        "primary": "#0058bc", "on-primary": "#ffffff", "on-primary-container": "#fefcff",
-        "on-secondary-container": "#57657b", "error": "#ba1a1a"
-      },
-      "borderRadius": { "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem" },
-      "spacing": { "gutter": "16px", "md": "16px", "xs": "8px", "base": "4px", "margin-mobile": "16px", "margin-desktop": "32px", "sm": "12px", "xl": "32px", "lg": "24px" },
-      "fontFamily": { "status-badge": ["Inter"], "headline-md": ["Inter"], "body-md": ["Inter"], "body-lg": ["Inter"], "label-caps": ["JetBrains Mono"], "headline-lg": ["Inter"] },
-      "fontSize": {
-        "status-badge": ["12px", { "lineHeight": "12px", "fontWeight": "700" }],
-        "headline-md": ["20px", { "lineHeight": "28px", "fontWeight": "600" }],
-        "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
-        "label-caps": ["12px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600" }],
-        "headline-lg": ["24px", { "lineHeight": "32px", "fontWeight": "600" }]
-      }
-    } }
-  }
-</script>
-<style>
-  .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
-  .no-scrollbar::-webkit-scrollbar { display: none; }
-  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-  body { min-height: max(884px, 100dvh); }
-</style>
-</head>
-<body class="bg-surface text-on-surface font-body-md min-h-screen flex flex-col md:flex-row">
-<header class="flex justify-between items-center w-full px-margin-mobile h-16 z-50 bg-surface border-b border-outline-variant md:hidden sticky top-0">
-<h1 class="font-headline-lg text-headline-lg font-bold text-primary tracking-tight">TOH Rental</h1>
-</header>
-<aside class="hidden md:flex flex-col h-full py-lg gap-xs bg-surface border-r border-outline-variant fixed left-0 top-0 w-[280px] z-40 overflow-y-auto no-scrollbar">
-<div class="px-4 mb-6">
-<h1 class="font-headline-md text-headline-md text-primary mb-6">TOH Rental</h1>
-</div>
-<nav class="flex flex-col gap-2">
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/overview?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">dashboard</span>
-<span class="font-label-caps text-label-caps">Overview</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/motorbikes?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">two_wheeler</span>
-<span class="font-label-caps text-label-caps">Motorbikes</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rentals?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">receipt_long</span>
-<span class="font-label-caps text-label-caps">Rentals</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/ai-tasks?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">smart_toy</span>
-<span class="font-label-caps text-label-caps">AI Tasks</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/data-quality?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">fact_check</span>
-<span class="font-label-caps text-label-caps">Data Quality</span>
-</a>
-<a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
-<span class="material-symbols-outlined">history</span>
-<span class="font-label-caps text-label-caps">Rental History</span>
-</a>
-</nav>
-</aside>
-<main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
-<header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0">
-<h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Rental History</h2>
-</header>
-<div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6">
-<div class="relative">
-<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-outline">search</span>
-<input id="search-input" class="w-full pl-10 pr-4 py-3 bg-surface-container-lowest border border-outline-variant rounded-xl focus:outline-none focus:ring-2 focus:ring-primary font-body-md text-body-md" placeholder="Search by renter, phone, or bike..." type="text">
-</div>
-<div id="history-list" class="flex flex-col gap-3">
-<div class="text-on-surface-variant">Loading rental history...</div>
-</div>
-</div>
-</main>
-<script>
-  const TOKEN = ${JSON.stringify(token)};
-  let ALL_HISTORY = [];
-
-  function historyCard(h) {
-    return \`<article class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-6">
-      <div class="w-10 h-10 rounded bg-surface-container flex items-center justify-center shrink-0 text-on-surface-variant">
-        <span class="material-symbols-outlined text-[20px]">two_wheeler</span>
-      </div>
-      <div class="flex-1 grid grid-cols-1 sm:grid-cols-4 gap-2 sm:gap-4">
-        <div>
-          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Renter</p>
-          <p class="font-body-md text-on-surface font-semibold">\${h.renterName || 'Unknown'}</p>
-          <p class="font-body-md text-on-surface-variant text-sm">\${h.renterPhone || '-'}</p>
-        </div>
-        <div>
-          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Bike</p>
-          <p class="font-body-md text-on-surface">\${h.model || h.bikeId || '-'}</p>
-          <p class="font-body-md text-on-surface-variant text-sm">\${h.bikeId || ''}</p>
-        </div>
-        <div>
-          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Dates</p>
-          <p class="font-body-md text-on-surface">\${h.startDate || '-'} \u2192 \${h.endDate || '-'}</p>
-          <p class="font-body-md text-on-surface-variant text-sm">\${h.days || '?'} days</p>
-        </div>
-        <div>
-          <p class="font-label-caps text-label-caps text-on-surface-variant mb-1">Price</p>
-          <p class="font-body-md text-on-surface font-semibold">\${h.price ? h.price + ' THB' : '-'}</p>
-          <p class="font-body-md text-on-surface-variant text-sm">\${h.loggedBy || ''}</p>
-        </div>
-      </div>
-    </article>\`;
-  }
-
-  function renderHistory() {
-    const list = document.getElementById('history-list');
-    const query = document.getElementById('search-input').value.trim().toLowerCase();
-    let filtered = ALL_HISTORY;
-    if (query) {
-      filtered = ALL_HISTORY.filter(h => \`\${h.renterName} \${h.renterPhone} \${h.bikeId} \${h.model}\`.toLowerCase().includes(query));
-    }
-    list.innerHTML = filtered.length ? filtered.map(historyCard).join('') : '<div class="text-on-surface-variant">No rental history yet.</div>';
-  }
-
-  document.getElementById('search-input').addEventListener('input', renderHistory);
-
-  async function loadHistory() {
-    try {
-      const res = await fetch('/api/toh/rental-history' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
-      const data = await res.json();
-      if (data.error) {
-        document.getElementById('history-list').innerHTML = '<div class="text-error">' + data.error + '</div>';
-        return;
-      }
-      ALL_HISTORY = data.history;
-      renderHistory();
-    } catch (err) {
-      document.getElementById('history-list').innerHTML = '<div class="text-error">Failed to load rental history</div>';
-    }
-  }
-  loadHistory();
-</script>
-</body></html>`);
-});
-
-app.get('/data-quality', (req, res) => {
-  const auth = checkDashboardAuth(req);
-  if (!auth.ok) {
-    return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
-  }
-  const token = req.query.token || '';
-  res.send(`<!DOCTYPE html><html class="light" lang="en"><head>
-<meta charset="utf-8">
-<meta content="width=device-width, initial-scale=1.0" name="viewport">
-<title>Data Quality Report - TOH Rental</title>
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com" rel="preconnect">
-<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
-<script id="tailwind-config">
-  tailwind.config = {
-    darkMode: "class",
-    theme: { extend: {
-      "colors": {
-        "outline-variant": "#c1c6d7", "background": "#faf8ff", "surface-container": "#eaedff",
-        "primary-container": "#0070eb", "surface-bright": "#faf8ff", "on-surface-variant": "#414755",
-        "surface-container-low": "#f2f3ff", "on-background": "#131b2e", "surface-container-lowest": "#ffffff",
-        "outline": "#717786", "secondary-container": "#d5e3fd", "on-surface": "#131b2e",
-        "surface": "#faf8ff", "surface-tint": "#005bc1", "secondary": "#515f74",
-        "surface-container-high": "#e2e7ff", "surface-container-highest": "#dae2fd",
-        "primary": "#0058bc", "on-primary": "#ffffff", "on-primary-container": "#fefcff",
-        "on-secondary-container": "#57657b", "error": "#ba1a1a"
-      },
-      "borderRadius": { "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem" },
-      "spacing": { "gutter": "16px", "md": "16px", "xs": "8px", "base": "4px", "margin-mobile": "16px", "margin-desktop": "32px", "sm": "12px", "xl": "32px", "lg": "24px" },
-      "fontFamily": { "status-badge": ["Inter"], "headline-md": ["Inter"], "body-md": ["Inter"], "body-lg": ["Inter"], "label-caps": ["JetBrains Mono"], "headline-lg": ["Inter"] },
-      "fontSize": {
-        "status-badge": ["12px", { "lineHeight": "12px", "fontWeight": "700" }],
-        "headline-md": ["20px", { "lineHeight": "28px", "fontWeight": "600" }],
-        "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
-        "label-caps": ["12px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600" }],
-        "headline-lg": ["24px", { "lineHeight": "32px", "fontWeight": "600" }]
-      }
-    } }
-  }
-</script>
-<style>
-  .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
-  .no-scrollbar::-webkit-scrollbar { display: none; }
-  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-  body { min-height: max(884px, 100dvh); }
-</style>
-</head>
-<body class="bg-surface text-on-surface font-body-md min-h-screen flex flex-col md:flex-row">
-<header class="flex justify-between items-center w-full px-margin-mobile h-16 z-50 bg-surface border-b border-outline-variant md:hidden sticky top-0">
-<h1 class="font-headline-lg text-headline-lg font-bold text-primary tracking-tight">TOH Rental</h1>
-</header>
-<aside class="hidden md:flex flex-col h-full py-lg gap-xs bg-surface border-r border-outline-variant fixed left-0 top-0 w-[280px] z-40 overflow-y-auto no-scrollbar">
-<div class="px-4 mb-6">
-<h1 class="font-headline-md text-headline-md text-primary mb-6">TOH Rental</h1>
-</div>
-<nav class="flex flex-col gap-2">
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/overview?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">dashboard</span>
-<span class="font-label-caps text-label-caps">Overview</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/motorbikes?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">two_wheeler</span>
-<span class="font-label-caps text-label-caps">Motorbikes</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rentals?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">receipt_long</span>
-<span class="font-label-caps text-label-caps">Rentals</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/ai-tasks?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">smart_toy</span>
-<span class="font-label-caps text-label-caps">AI Tasks</span>
-</a>
-<a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
-<span class="material-symbols-outlined">fact_check</span>
-<span class="font-label-caps text-label-caps">Data Quality</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rental-history?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">history</span>
-<span class="font-label-caps text-label-caps">Rental History</span>
-</a>
-</nav>
-</aside>
-<main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
-<header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0">
-<h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Data Quality Report</h2>
-</header>
-<div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6">
-<p class="text-on-surface-variant text-sm">Read-only list of booking rows with a messy price or placeholder-looking date. Nothing here is auto-fixed \u2014 edit the flagged rows directly in the Google Sheet with the correct values.</p>
-<div id="summary" class="text-on-surface-variant"></div>
-<div id="report" class="flex flex-col gap-3"></div>
 </div>
 </main>
 <script>
   const TOKEN = ${JSON.stringify(token)};
   async function load() {
     try {
-      const res = await fetch('/api/toh/data-quality' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
-      const data = await res.json();
-      if (data.error) {
-        document.getElementById('summary').innerHTML = '<span class="text-error">' + data.error + '</span>';
-        return;
-      }
-      document.getElementById('summary').textContent = data.issues.length + ' of ' + data.totalRows + ' booking rows need attention.';
-      document.getElementById('report').innerHTML = data.issues.length ? data.issues.map(r => \`
-        <div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4">
-          <div class="flex justify-between items-start mb-2">
-            <span class="font-semibold">Row \${r.row} \u2014 \${r.name || 'Unknown'} \u00b7 \${r.bike || '-'}</span>
-            <span class="text-xs text-on-surface-variant">\${r.date}</span>
-          </div>
-          <div class="text-sm text-on-surface-variant grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
-            <div><span class="text-on-surface-variant">Start:</span> \${r.startDate || '-'}</div>
-            <div><span class="text-on-surface-variant">End:</span> \${r.endDate || '-'}</div>
-            <div><span class="text-on-surface-variant">Price:</span> \${r.price || '-'}</div>
-            <div><span class="text-on-surface-variant">Location:</span> \${r.location || '-'}</div>
-          </div>
-          <div class="flex flex-wrap gap-1">
-            \${r.problems.map(p => \`<span class="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-200">\${p}</span>\`).join('')}
-          </div>
-        </div>
-      \`).join('') : '<div class="text-on-surface-variant">No issues found \ud83c\udf89</div>';
-    } catch (err) {
-      document.getElementById('summary').innerHTML = '<span class="text-error">Failed to load report</span>';
-    }
+      const res = await fetch('/api/toh/dashboard' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
+      const d = await res.json();
+      if (d.error) { document.getElementById('stats').innerHTML = '<span class="text-error">' + d.error + '</span>'; return; }
+      const f = d.fleet || {};
+      document.getElementById('stats').innerHTML = [
+        { label: 'Active Rentals', value: d.activeRentals || 0, color: 'bg-amber-500' },
+        { label: 'Available', value: f.available || 0, color: 'bg-emerald-500' },
+        { label: 'Rented', value: f.rented || 0, color: 'bg-blue-500' },
+        { label: 'AI Tasks', value: d.openTasks || 0, color: 'bg-violet-500' },
+      ].map(s => '<div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4"><div class="text-2xl font-bold">' + s.value + '</div><div class="text-xs text-on-surface-variant mt-1">' + s.label + '</div></div>').join('');
+      const rb = d.recentBookings || [];
+      document.getElementById('recentBookings').innerHTML = rb.length ? rb.map(b => '<div class="flex justify-between items-center py-2 border-b border-outline-variant last:border-0"><div><span class="font-semibold">' + (b.customer_name || b.name || '-') + '</span><br><span class="text-xs">' + (b.bike_type || b.bike || '-') + '</span></div><div class="text-right text-xs"><div>' + (b.start_date || b.startDate || '') + ' - ' + (b.end_date || b.endDate || '') + '</div><div class="font-semibold mt-1">' + (b.price || '-') + '</div></div></div>').join('') : '<div class="text-sm">No recent bookings</div>';
+      document.getElementById('fleetStatus').innerHTML = '<div class="flex items-center gap-2"><div class="w-full bg-outline-variant rounded-full h-2"><div class="bg-emerald-500 h-2 rounded-full" style="width:' + (f.total ? (f.available/f.total*100) : 0) + '%"></div></div><span class="text-xs whitespace-nowrap">' + (f.available || 0) + '/' + (f.total || 0) + ' avail</span></div><div class="flex justify-between text-xs text-on-surface-variant"><span>Rented: ' + (f.rented || 0) + '</span><span>Other: ' + (f.other || 0) + '</span></div>';
+    } catch (err) { document.getElementById('stats').innerHTML = '<span class="text-error">Failed to load</span>'; }
   }
   load();
+  setInterval(load, 30000);
 </script>
 </body></html>`);
 });
