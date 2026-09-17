@@ -11,23 +11,15 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const STAFF_GROUP_ID = process.env.STAFF_GROUP_ID;
-// Comma-separated list of staff phone numbers (with country code, no +, e.g. "6695...,6681...") to broadcast notifications to.
 const STAFF_NUMBERS = (process.env.STAFF_NUMBERS || '66950615202')
   .split(',')
   .map(n => n.trim())
   .filter(Boolean);
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const MY_NUMBER = process.env.MY_NUMBER;
-// Optional: set DASHBOARD_TOKEN in Railway env vars to require ?token=... on /dashboard.
-// Leave unset during testing; set it before sharing the URL anywhere.
 const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || '';
-// Optional second token for the boss (or anyone else) — same full access as
-// DASHBOARD_TOKEN, but a distinct value so logs can show who did what.
 const BOSS_TOKEN = process.env.BOSS_TOKEN || '';
 
-// Checks the ?token= query param against every known valid token and
-// returns which person it belongs to, so route handlers can both gate
-// access and log a human-readable actor name for state-changing actions.
 function checkDashboardAuth(req) {
   const token = req.query.token || '';
   if (!DASHBOARD_TOKEN) return { ok: true, user: 'Unknown (no token set)' };
@@ -59,11 +51,6 @@ function parseThbAmount(str) {
   return match ? parseFloat(match[0]) : 0;
 }
 
-// Stricter than parseThbAmount above: used by the Dashboard aggregation so
-// messy AI-parsed rows (e.g. a full sentence in the Price column instead of
-// a number) get SKIPPED from revenue totals rather than silently mis-parsed.
-// Only accepts a plain number, optionally with commas/decimals and a
-// trailing "THB" - anything else (extra words, placeholders) returns null.
 function parseCleanPrice(str) {
   if (!str) return null;
   const trimmed = String(str).trim();
@@ -91,8 +78,6 @@ async function logTask(type, description, contact) {
   }
 }
 
-// Returns every task row with its sheet row number as `id` (used to target
-// the right row when resolving). Most recent first.
 async function getTasks() {
   try {
     return db.getTasks();
@@ -106,8 +91,6 @@ async function resolveTask(taskId) {
   return db.resolveTask(taskId);
 }
 
-// Reads bookings and flags rows with messy price or placeholder-looking
-// dates, for the /data-quality diagnostic report.
 async function getBookingsWithIssues() {
   try {
     const bookings = db.getRecentBookings(500);
@@ -130,7 +113,7 @@ async function getBookingsWithIssues() {
       };
       const problems = [];
       if (parseCleanPrice(booking.price) === null) problems.push('Price is not a clean number');
-      const isCleanDate = (str) => /\\d/.test(str || '') && !str.includes('[') && !str.includes(']');
+      const isCleanDate = (str) => /\d/.test(str || '') && !str.includes('[') && !str.includes(']');
       if (!isCleanDate(booking.startDate)) problems.push('Start Date looks invalid/placeholder');
       if (!isCleanDate(booking.endDate)) problems.push('End Date looks invalid/placeholder');
       if (problems.length > 0) issues.push({ ...booking, problems });
@@ -158,7 +141,7 @@ async function getTodayBookings() {
     const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok' });
     let msg = `*Today Bookings (${today}):*\n\n`;
     bookings.forEach((row, i) => {
-      msg += `${i+1}. ${row.bike_type || 'Unknown bike'}\n`;
+      msg += `${i + 1}. ${row.bike_type || 'Unknown bike'}\n`;
       msg += `   Name: ${row.customer_name || '-'}\n`;
       msg += `   Phone: ${row.phone || '-'}\n`;
       msg += `   Start: ${row.start_date || '-'}\n`;
@@ -172,9 +155,6 @@ async function getTodayBookings() {
   }
 }
 
-// Parses a DD/MM/YYYY string (the en-GB format used everywhere in this file)
-// and returns the whole-day difference between two such dates, or null if
-// either can't be parsed.
 function daysBetweenEnGBDates(startStr, endStr) {
   const parse = (s) => {
     if (!s) return null;
@@ -190,7 +170,6 @@ function daysBetweenEnGBDates(startStr, endStr) {
   return Math.max(0, Math.round(diffMs / (1000 * 60 * 60 * 24)));
 }
 
-// Returns every logged history entry for one specific bike, most recent first.
 async function getAllRentalHistory() {
   try {
     return db.getAllRentalHistory();
@@ -232,7 +211,7 @@ async function setBikeStatus(plateQuery, status, fleetSheetId, options = {}) {
       return { ok: false, message: `${bike.plate} is Reserved. Resolve the reservation first.` };
     }
     const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok' });
-    db.createRental({
+    const result = db.createRental({
       plate: bike.plate,
       customer_name: options.renterName || '',
       customer_phone: options.renterPhone || '',
@@ -241,6 +220,7 @@ async function setBikeStatus(plateQuery, status, fleetSheetId, options = {}) {
       price: parseFloat(options.price) || 0,
       logged_by: options.loggedBy || '',
     });
+    if (!result.ok) return result;
     return { ok: true, message: `${bike.plate} marked as Rented.` };
   }
 
@@ -248,22 +228,20 @@ async function setBikeStatus(plateQuery, status, fleetSheetId, options = {}) {
     if (bike.status === 'Available' || bike.status === '') {
       return { ok: false, message: `${bike.plate} is already Available. No active rental to return.` };
     }
+    if (bike.status === 'Maintenance') {
+      return { ok: false, message: `${bike.plate} is in Maintenance - clear that status first.` };
+    }
     const result = db.completeRental(bike.plate, options.price || '0', options.loggedBy || '');
     if (!result.ok) return result;
     return { ok: true, message: `${bike.plate} marked as Available (returned from ${result.customer}).` };
   }
 
-  // Other status changes (Maintenance, Reserved) — just update
-  const statusMap = { 'Maintenance': 'Maintenance', 'maintenance': 'Maintenance', 'Reserved': 'Reserved', 'reserved': 'Reserved' };
+  const statusMap = { Maintenance: 'Maintenance', maintenance: 'Maintenance', Reserved: 'Reserved', reserved: 'Reserved' };
   const newStatus = statusMap[status] || status;
   db.updateBikeStatus(bike.plate, newStatus);
   return { ok: true, message: `${bike.plate} marked as ${newStatus}.` };
 }
 
-/**
- * Writes extracted contract data (Renter Name, Renter Phone, Rented Date,
- * Expected Return, Status) into the matching Fleet Tracker row.
- */
 async function autoFillContractToFleet(extracted) {
   const bike = db.getMotorbikeByPlate(extracted.plate);
   if (!bike) {
@@ -275,7 +253,7 @@ async function autoFillContractToFleet(extracted) {
   if (bike.status === 'Maintenance') {
     return { ok: false, message: `${bike.plate} is in Maintenance. Auto-fill blocked.` };
   }
-  db.createRental({
+  const result = db.createRental({
     plate: bike.plate,
     customer_name: extracted.renterName || '',
     customer_phone: extracted.renterPhone || '',
@@ -284,6 +262,7 @@ async function autoFillContractToFleet(extracted) {
     price: extracted.price || 0,
     logged_by: 'Contract OCR',
   });
+  if (!result.ok) return result;
   return { ok: true, message: `${bike.plate} auto-filled from contract (${extracted.renterName}).` };
 }
 
@@ -298,19 +277,24 @@ async function getFleetAvailability() {
 
 async function getFleetList() {
   const bikes = db.getAllMotorbikes();
-  return bikes.map(b => ({
-    bikeId: b.plate,
-    model: b.model,
-    color: b.color,
-    location: b.location,
-    renterName: '',
-    renterPhone: '',
-    rentedDate: '',
-    expectedReturn: '',
-    returnedDate: '',
-    status: b.status,
-    notes: b.notes,
-  }));
+  const activeRentals = db.getActiveRentals();
+  const byPlate = new Map(activeRentals.map(r => [r.plate, r]));
+  return bikes.map(b => {
+    const rental = byPlate.get(b.plate);
+    return {
+      bikeId: b.plate,
+      model: b.model,
+      color: b.color,
+      location: b.location,
+      renterName: rental?.customer_name || '',
+      renterPhone: rental?.customer_phone || '',
+      rentedDate: rental?.start_date || '',
+      expectedReturn: rental?.end_date || '',
+      returnedDate: '',
+      status: b.status,
+      notes: b.notes,
+    };
+  });
 }
 
 function formatFleetSummary(byType) {
@@ -324,29 +308,17 @@ function formatFleetSummary(byType) {
   return msg;
 }
 
-function haversineKm(lat1, lon1, lat2, lon2) {
-  const toRad = deg => (deg * Math.PI) / 180;
-  const R = 6371;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-async function getNearestBikes(custLat, custLon) {
+async function getNearestBikes() {
   try {
     const bikes = db.getAllMotorbikes().filter(b => b.status === 'Available');
-    if (bikes.length === 0) return "No bikes available right now.";
+    if (bikes.length === 0) return 'No bikes available right now.';
     let msg = '*Nearest Available Bikes:*\n\n';
     bikes.slice(0, 8).forEach((b, i) => {
-      msg += `${i+1}. ${b.plate} — ${b.model} (${b.color || 'N/A'})\n`;
-      msg += `   Location: ${b.location || 'Chaweng'} — Status: ${b.status}\n\n`;
+      msg += `${i + 1}. ${b.plate} - ${b.model} (${b.color || 'N/A'})\n`;
+      msg += `   Location: ${b.location || 'Chaweng'} - Status: ${b.status}\n\n`;
     });
     if (bikes.length > 8) msg += `...and ${bikes.length - 8} more available bikes.\n`;
-    msg += 'Share your location pin (📎 → Location) for distance-sorted results.';
+    msg += 'Share your location pin (attach -> Location) for distance-sorted results.';
     return msg;
   } catch (err) {
     console.error('Nearest bikes error:', err.message);
@@ -363,57 +335,68 @@ async function logPhotoReceived(from, mediaId, mimeType) {
 }
 
 async function forwardImageToStaff(mediaId, caption) {
-  await Promise.all(STAFF_NUMBERS.map(num =>
-    axios.post(
-      `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        to: num,
-        type: 'image',
-        image: { id: mediaId, caption },
-      },
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-    ).catch(err => console.error('Forward image error:', err.message))
-  ));
+  await Promise.all(
+    STAFF_NUMBERS.map(num =>
+      axios
+        .post(
+          `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+          {
+            messaging_product: 'whatsapp',
+            to: num,
+            type: 'image',
+            image: { id: mediaId, caption },
+          },
+          { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
+        )
+        .catch(err => console.error('Forward image error:', err.message))
+    )
+  );
 }
 
 async function handleIncomingPhoto(from, mediaId) {
   try {
-    const metaRes = await axios.get(
-      `https://graph.facebook.com/v19.0/${mediaId}`,
-      { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
-    );
+    const metaRes = await axios.get(`https://graph.facebook.com/v19.0/${mediaId}`, {
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+    });
     const mimeType = metaRes.data.mime_type || 'image/jpeg';
     const mediaUrl = metaRes.data.url;
 
-    try { await forwardImageToStaff(mediaId, `📄 Photo from +${from}`); } catch (fwdErr) { console.error('Forward step failed:', fwdErr.message); }
-    try { await logPhotoReceived(from, mediaId, mimeType); } catch (logErr) { console.error('Log photo step failed:', logErr.message); }
+    try {
+      await forwardImageToStaff(mediaId, `Photo from +${from}`);
+    } catch (fwdErr) {
+      console.error('Forward step failed:', fwdErr.message);
+    }
+    try {
+      await logPhotoReceived(from, mediaId, mimeType);
+    } catch (logErr) {
+      console.error('Log photo step failed:', logErr.message);
+    }
 
     try {
       const extracted = await extractContractData(mediaUrl, `Bearer ${WHATSAPP_TOKEN}`);
       if (shouldAutoFill(extracted)) {
         const result = await autoFillContractToFleet(extracted);
         if (result.ok) {
-          await notifyStaff(`✅ Auto-filled fleet from contract photo (+${from}):\n${result.message}`);
+          await notifyStaff(`Auto-filled fleet from contract photo (+${from}):\n${result.message}`);
         } else {
-          await notifyStaff(`⚠️ Contract read OK but couldn't auto-fill (+${from}):\n${result.message}\nPlease enter manually.`);
+          await notifyStaff(`Contract read OK but couldn't auto-fill (+${from}):\n${result.message}\nPlease enter manually.`);
           await logTask('Contract Auto-fill Failed', result.message + '\n' + describeExtraction(extracted), `+${from}`);
         }
       } else {
         const taskDesc = describeExtraction(extracted);
-        await notifyStaff(`⚠️ Contract photo from +${from} needs manual entry.\n${taskDesc}\nPlease check the photo above and use "rent <plate>".`);
+        await notifyStaff(`Contract photo from +${from} needs manual entry.\n${taskDesc}\nPlease check the photo above and use "rent <plate>".`);
         await logTask('Contract Needs Manual Entry', taskDesc, `+${from}`);
       }
     } catch (extractErr) {
       console.error('Contract extraction error:', extractErr.message);
-      await notifyStaff(`⚠️ Couldn't auto-read contract photo from +${from} — please enter manually.`);
+      await notifyStaff(`Couldn't auto-read contract photo from +${from} - please enter manually.`);
       await logTask('Contract Read Error', extractErr.message, `+${from}`);
     }
 
-    await sendWhatsApp(from, 'Got it, sent to our team ✅');
+    await sendWhatsApp(from, 'Got it, sent to our team.');
   } catch (err) {
     console.error('Photo handling error:', err.message);
-    await sendWhatsApp(from, "Sorry, I couldn't process that photo — please try sending it again.");
+    await sendWhatsApp(from, "Sorry, I couldn't process that photo - please try sending it again.");
   }
 }
 
@@ -438,63 +421,83 @@ app.post('/webhook', async (req, res) => {
       if (message.type === 'text') {
         const text = message.text.body.trim();
         console.log(`Message from ${from}: ${text}`);
+
         const isStaff = STAFF_NUMBERS.includes(from);
 
         if (isStaff) {
           const cmd = text.toLowerCase();
-          if (cmd === 'list today') { const list = await getTodayBookings(); await sendWhatsApp(from, list); return res.sendStatus(200); }
-          if (cmd === 'fleet') { const byType = await getFleetAvailability(); await sendWhatsApp(from, `*Fleet Availability:*\n\n${formatFleetSummary(byType)}`); return res.sendStatus(200); }
+          if (cmd === 'list today') {
+            const list = await getTodayBookings();
+            await sendWhatsApp(from, list);
+            return res.sendStatus(200);
+          }
+          if (cmd === 'fleet') {
+            const byType = await getFleetAvailability(true);
+            await sendWhatsApp(from, `*Fleet Availability:*\n\n${formatFleetSummary(byType)}`);
+            return res.sendStatus(200);
+          }
           const rentMatch = text.match(/^rent\s+(.+)$/i);
-          if (rentMatch) { const result = await setBikeStatus(rentMatch[1], 'Rented'); await sendWhatsApp(from, result.message); return res.sendStatus(200); }
+          if (rentMatch) {
+            const result = await setBikeStatus(rentMatch[1], 'Rented');
+            await sendWhatsApp(from, result.message);
+            return res.sendStatus(200);
+          }
           const returnMatch = text.match(/^return\s+(\S+)(?:\s+(\d+(?:\.\d+)?))?\s*$/i);
           if (returnMatch) {
             const [, plate, priceStr] = returnMatch;
-            const result = await setBikeStatus(plate, 'Available', '', { price: priceStr || '', loggedBy: `WhatsApp Staff +${from}` });
-            await sendWhatsApp(from, result.message); return res.sendStatus(200);
+            const result = await setBikeStatus(plate, 'Available', null, {
+              price: priceStr || '',
+              loggedBy: `WhatsApp Staff +${from}`,
+            });
+            await sendWhatsApp(from, result.message);
+            return res.sendStatus(200);
           }
           const expenseMatch = text.match(/^expense\s+(\S+)\s+(\d+(?:\.\d+)?)\s*(.*)$/i);
           if (expenseMatch) {
             const [, bike, amountStr, description] = expenseMatch;
             await logFinance('Expense', bike, parseFloat(amountStr), description || 'No description', `+${from}`);
-            await sendWhatsApp(from, `Logged: ${amountStr} THB expense for ${bike}${description ? ' — ' + description : ''}`);
+            await sendWhatsApp(from, `Logged: ${amountStr} THB expense for ${bike}${description ? ' - ' + description : ''}`);
             return res.sendStatus(200);
           }
           if (cmd === 'finance' || cmd === 'income') {
             const summary = await getFinanceSummary();
-            if (!summary) { await sendWhatsApp(from, "Couldn't load finance data right now."); }
-            else {
-              await sendWhatsApp(from, `*Finance Summary:*\n\nTotal Income: ${summary.income.toLocaleString()} THB\nTotal Expenses: ${summary.expense.toLocaleString()} THB\nNet: ${summary.net.toLocaleString()} THB\n(${summary.count} entries)`);
+            if (!summary) {
+              await sendWhatsApp(from, "Couldn't load finance data right now.");
+            } else {
+              await sendWhatsApp(
+                from,
+                `*Finance Summary:*\n\nTotal Income: ${summary.income.toLocaleString()} THB\nTotal Expenses: ${summary.expense.toLocaleString()} THB\nNet: ${summary.net.toLocaleString()} THB\n(${summary.count} entries)`
+              );
             }
             return res.sendStatus(200);
           }
           if (cmd === 'help' || cmd === 'commands') {
-            await sendWhatsApp(from, "Staff commands:\n- fleet: full bike availability\n- list today: today's bookings\n- rent <plate>: mark a bike as rented (e.g. rent 3990)\n- return <plate> [price]: mark a bike as available, optionally logging the price paid (e.g. return 3990 1200)\n- expense <plate> <amount> <description>: log an expense (e.g. expense 3990 500 broken mirror)\n- finance: income/expense/profit summary");
+            await sendWhatsApp(
+              from,
+              "Staff commands:\n- fleet: full bike availability\n- list today: today's bookings\n- rent <plate>: mark a bike as rented (e.g. rent 3990)\n- return <plate> [price]: mark a bike as available, optionally logging the price paid (e.g. return 3990 1200)\n- expense <plate> <amount> <description>: log an expense (e.g. expense 3990 500 broken mirror)\n- finance: income/expense/profit summary"
+            );
             return res.sendStatus(200);
           }
           await sendWhatsApp(from, "Didn't recognize that as a command. Text 'help' to see what I can do.");
           return res.sendStatus(200);
         }
+
         await handleMessage(from, text);
       } else if (message.type === 'location') {
-        const { latitude, longitude } = message.location;
-        console.log(`Location from ${from}: ${latitude}, ${longitude}`);
-        const nearby = await getNearestBikes(latitude, longitude);
+        const nearby = await getNearestBikes();
         await sendWhatsApp(from, nearby);
       } else if (message.type === 'image') {
         const mediaId = message.image.id;
         console.log(`Image from ${from}: media ${mediaId}`);
         await handleIncomingPhoto(from, mediaId);
       } else {
-        await sendWhatsApp(from, 'Sorry, I can only read text messages, photos, or shared locations. Please type your question, send a photo, or share your location (tap 📎 attach → Location) so I can tell you the nearest available bikes.');
+        await sendWhatsApp(from, 'Sorry, I can only read text messages, photos, or shared locations. Please type your question, send a photo, or share your location.');
       }
     }
   }
   res.sendStatus(200);
 });
 
-// Asks Gemini to extract booking fields from the confirmed booking summary
-// text as structured JSON (constrained by responseSchema) instead of relying
-// on regex against freeform text.
 async function extractBookingJSON(summaryText) {
   const schema = {
     type: 'OBJECT',
@@ -509,18 +512,15 @@ async function extractBookingJSON(summaryText) {
     },
     required: ['name', 'phone', 'bike', 'startDate', 'endDate', 'location', 'price'],
   };
-  const prompt = `Extract the booking details from this confirmed booking summary into the given JSON schema. The "price" field must be ONLY the total number in THB (no currency symbol, no words, no per-day rate) - e.g. if the summary says "Price: 3750 THB", price should be 3750. If a field is genuinely missing from the summary, use an empty string for text fields or 0 for price. Do not invent details that aren't in the summary.\n\nBooking summary:\n${summaryText}`;
+  const prompt = `Extract the booking details from this confirmed booking summary into the given JSON schema. The "price" field must be ONLY the total number in THB. If a field is genuinely missing from the summary, use an empty string for text fields or 0 for price. Do not invent details that aren't in the summary.\n\nBooking summary:\n${summaryText}`;
 
-  const response = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-    {
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        responseSchema: schema,
-      },
-    }
-  );
+  const response = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: schema,
+    },
+  });
   const jsonText = response.data.candidates[0].content.parts[0].text;
   return JSON.parse(jsonText);
 }
@@ -540,70 +540,54 @@ async function handleMessage(from, text) {
 
 CURRENT LIVE FLEET AVAILABILITY (bike type: available/total bikes right now):
 ${fleetSummary}
-If a bike type shows 0 available, tell the customer it's fully booked right now and suggest a similar available alternative. Match the customer's wording to the closest bike type in this list (e.g. "Click" or "click 125" means "Honda Click 125"). Never say a bike is available if its available count is 0.
+If a bike type shows 0 available, tell the customer it's fully booked right now and suggest a similar available alternative. Match the customer's wording to the closest bike type in this list. Never say a bike is available if its available count is 0.
 
-If a customer asks how far a bike is, where the nearest bike is, or anything about distance/location, ask them to share their location using WhatsApp's location-sharing feature (tap the attach/paperclip icon and choose Location). Do not guess distances yourself — the system will handle it once they share their pin.
+If a customer asks how far a bike is, where the nearest bike is, or anything about distance/location, ask them to share their location using WhatsApp's location-sharing feature. Do not guess distances yourself.
 
 ABOUT TOH:
-- Located in Chaweng, Koh Samui (Chaweng Yai Soi 4 Bo Put, Surat Thani 84320)
+- Located in Chaweng, Koh Samui
 - Over 5 years experience, fleet of 100+ well-maintained bikes
 - Only Honda and Yamaha bikes
 - Open 7 days a week
 - Phone: +66 622 531 159
 
-OUR BIKES AND PRICES (THB per day — rate depends on rental length):
-- Honda Scoopy 110cc (2022-2025): 300 THB/day for 1-2 days, 250 THB/day for 3+ days - Cheapest option
-- Honda Click 125cc (2022-2026): 300 THB/day for 1-2 days, 250 THB/day for 3+ days - Popular
+OUR BIKES AND PRICES (THB per day - rate depends on rental length):
+- Honda Scoopy 110cc (2022-2025): 300 THB/day for 1-2 days, 250 THB/day for 3+ days
+- Honda Click 125cc (2022-2026): 300 THB/day for 1-2 days, 250 THB/day for 3+ days
 - Honda Click 150cc (2022-2025): 300 THB/day for 1-2 days, 250 THB/day for 3+ days
 - Yamaha Filano 125cc (2022-2025): 300 THB/day for 1-2 days, 250 THB/day for 3+ days
-- Honda Click 160cc (2022-2025): 400 THB/day for 1-2 days, 350 THB/day for 3+ days - Popular
+- Honda Click 160cc (2022-2025): 400 THB/day for 1-2 days, 350 THB/day for 3+ days
 - Yamaha Aerox 155cc (2020-2022): 350 THB/day for 1-2 days, 300 THB/day for 3+ days
 - Yamaha Nmax 155cc (2021-2026): 450 THB/day for 1-2 days, 400 THB/day for 3+ days
-- Honda ADV 160cc (2024-2026): 450 THB/day for 1-2 days, 400 THB/day for 3+ days - Best Value
+- Honda ADV 160cc (2024-2026): 450 THB/day for 1-2 days, 400 THB/day for 3+ days
 - Honda PCX 160cc (2022-2025): 450 THB/day for 1-2 days, 400 THB/day for 3+ days
 - Yamaha Xmax 300cc (2022-2025): 850 THB/day for 1-2 days, 800 THB/day for 3+ days
 - Honda ADV 350cc (2022-2025): 900 THB/day for 1-2 days, 850 THB/day for 3+ days
 - Honda XADV 750cc (2025): 2500 THB/day for 1-2 days, 2000 THB/day for 3+ days
-- Honda Forza: 750 THB/day (single rate, not listed on official site — confirm with staff for exact terms)
+- Honda Forza: 750 THB/day (single rate, confirm with staff for exact terms)
 
-PRICING RULE: If the rental is 1 or 2 days, use the "1-2 days" rate × number of days. If the rental is 3 or more days, use the "3+ days" rate × number of days. Always apply the correct per-day rate for the actual length being booked — never default to one rate regardless of duration.
-If a customer asks about a bike not in this price list (e.g. Honda PCX with unconfirmed cc), do NOT make up a price. Tell them you'll need to check with staff for that model's price and offer to connect them.
+PRICING RULE: If the rental is 1 or 2 days, use the 1-2 days rate x number of days. If the rental is 3 or more days, use the 3+ days rate x number of days.
+If a customer asks about a bike not in this price list, do not make up a price. Tell them you'll need to check with staff.
 
 DELIVERY & PICKUP ZONES:
-- In-zone (normal booking, no extra steps, no fee — delivery is always free): Chaweng, Chaweng Noi, Bo Put, Choeng Mon, Maenam, Bang Rak, Central Samui, Lamai
-- Out-of-zone (do NOT confirm booking yourself — tell the customer their location is outside our normal delivery range and a staff member will confirm if it's possible, then flag for human help): Nathon, Taling Ngam, Lipa Noi, Baan Tai
-- If the customer names a pickup location not in either list, do not guess which zone it's in — ask them to confirm it's within our normal area, or say a staff member will confirm if unsure.
-- Never finalize a booking (never say "BOOKING_COMPLETE") for an out-of-zone or unrecognized location without staff confirmation first.
-
-INCLUDED: Helmet provided, optional comprehensive insurance available. No hidden fees. Delivery is always free within our zone.
+- In-zone: Chaweng, Chaweng Noi, Bo Put, Choeng Mon, Maenam, Bang Rak, Central Samui, Lamai
+- Out-of-zone: Nathon, Taling Ngam, Lipa Noi, Baan Tai
+- If the customer names a pickup location not in either list, do not guess which zone it's in.
+- Never finalize a booking for an out-of-zone or unrecognized location without staff confirmation first.
 
 BOOKING: Collect full name, phone number, bike type, rental start date, rental end date, pickup location.
-- Today's date is ${todayStr} in Koh Samui (Thailand, GMT+7). Use this exact date for all "today", "tomorrow", and "X days from today" calculations.
-- If customer says "today", use today as start date automatically.
-- If customer says "X days from today" or "X days starting today", calculate the end date automatically. Example: "5 days from today" = start today, end = today + 5 days.
-- If customer says "1 week", that means 7 days. Calculate end date automatically.
-- NEVER ask for start or end date again if the customer already gave you enough info to calculate them.
-- When summarizing booking details, do NOT use markdown formatting like ** or *. Use plain text only.
-- Price must be the TOTAL cost for the full rental period (daily rate × number of days), not just the per-day rate. Show the calculation briefly if helpful, but the "Price" field itself must be the final total number in THB.
-Once you have all details say exactly: "BOOKING_COMPLETE" followed by a plain text summary with each field on its own line like:
-Full Name: ...
-Phone Number: ...
-Bike Type: ...
-Start Date: ...
-End Date: ...
-Pickup Location: ...
-Price: ... (total THB for the full rental, e.g. "1250 THB")
+- Today's date is ${todayStr} in Koh Samui.
+- When summarizing booking details, do not use markdown formatting.
+- Price must be the TOTAL cost for the full rental period.
+Once you have all details say exactly: "BOOKING_COMPLETE" followed by a plain text summary.
 If customer needs human help say exactly: "NEED_HUMAN_HELP".
 Be friendly, helpful and concise. Answer in the same language the customer writes in.`;
 
   try {
-    const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        system_instruction: { parts: [{ text: systemPrompt }] },
-        contents: conv.history
-      }
-    );
+    const response = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+      system_instruction: { parts: [{ text: systemPrompt }] },
+      contents: conv.history,
+    });
     const reply = response.data.candidates[0].content.parts[0].text;
     conv.history.push({ role: 'model', parts: [{ text: reply }] });
 
@@ -663,7 +647,7 @@ async function sendWhatsApp(to, message) {
         messaging_product: 'whatsapp',
         to,
         type: 'text',
-        text: { body: message }
+        text: { body: message },
       },
       { headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` } }
     );
@@ -676,344 +660,231 @@ async function notifyStaff(message) {
   await Promise.all(STAFF_NUMBERS.map(num => sendWhatsApp(num, message)));
 }
 
-async function getRecentBookings(limit = 10) {
-  try {
-    return db.getRecentBookings(limit);
-  } catch (err) {
-    console.error('Recent bookings error:', err.message);
-    return [];
-  }
+async function getRecentBookings() {
+  return db.getRecentBookings(10);
 }
 
-async function getRecentPhotos(limit = 10) {
-  try {
-    return db.getRecentPhotos(limit);
-  } catch (err) {
-    console.error('Recent photos error:', err.message);
-    return [];
-  }
+async function getRecentPhotos() {
+  return db.getRecentPhotos(10);
 }
 
-async function getDashboardStats(shop) {
-  try {
-    const stats = db.getDashboardStats();
-    const bikes = db.getAllMotorbikes();
-    return {
-      fleet: {
-        total: bikes.length,
-        available: bikes.filter(b => b.status === 'Available').length,
-        rented: bikes.filter(b => b.status === 'Rented').length,
-        other: bikes.filter(b => b.status === 'Maintenance' || b.status === 'Reserved').length,
-      },
-      bookings: {
-        totalCount: stats.todayBookings,
-        cleanBookingCount: stats.todayBookings,
-        skippedBookingCount: 0,
-        totalRevenue: stats.finance.income,
-      },
-      recentBookings: db.getRecentBookings(5),
-      activeRentals: stats.activeRentals,
-      openTasks: stats.openTasks,
-    };
-  } catch (err) {
-    console.error('Dashboard stats error:', err.message);
-    return {
-      fleet: { total: 0, available: 0, rented: 0, other: 0 },
-      bookings: { totalCount: 0, cleanBookingCount: 0, skippedBookingCount: 0, totalRevenue: 0 },
-      recentBookings: [],
-      activeRentals: 0,
-      openTasks: 0,
-    };
-  }
+async function getDashboardStats() {
+  const stats = db.getDashboardStats();
+  return {
+    activeRentals: stats.activeRentals || 0,
+    openTasks: stats.openTasks || 0,
+    recentBookings: db.getRecentBookings(10),
+    finance: stats.finance,
+    fleet: {
+      total: stats.totalBikes || 0,
+      available: stats.available || 0,
+      rented: stats.rented || 0,
+      other: stats.maintenance || 0,
+    },
+  };
 }
 
 app.get('/api/dashboard-data', async (req, res) => {
   try {
-    const auth = checkDashboardAuth(req);
-    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
-    const [bookings, photos, fleet, finance] = await Promise.all([
-      getRecentBookings(10).catch(() => []),
-      getRecentPhotos(10).catch(() => []),
-      getFleetAvailability().catch(() => ({})),
-      getFinanceSummary().catch(() => null),
-    ]);
-    res.json({ bookings, photos, fleet, finance, updatedAt: new Date().toISOString() });
+    const stats = await getDashboardStats();
+    const bookings = await getRecentBookings();
+    const photos = await getRecentPhotos();
+    res.json({ stats, bookings, photos });
   } catch (err) {
-    console.error('Dashboard data error:', err.message);
-    res.status(500).json({ error: 'Failed to load dashboard data' });
+    res.status(500).json({ error: err.message });
   }
 });
 
 app.get('/api/:shopId/motorbikes', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const auth = checkDashboardAuth(req);
-    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
-    const shop = getShop(req.params.shopId);
+    getShop(req.params.shopId);
     const bikes = await getFleetList();
-    res.json({ shop: shop.name, bikes, updatedAt: new Date().toISOString() });
+    res.json({ bikes });
   } catch (err) {
-    console.error('Motorbikes API error:', err.message);
-    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
-    res.status(status).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
 app.post('/api/:shopId/motorbikes/:bikeId/status', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const auth = checkDashboardAuth(req);
-    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
-    const shop = getShop(req.params.shopId);
-    const { status, price, renterName, renterPhone, rentedDate, expectedReturn } = req.body || {};
-    if (!['Rented', 'Available'].includes(status)) {
-      return res.status(400).json({ error: 'status must be "Rented" or "Available"' });
-    }
-    const result = await setBikeStatus(req.params.bikeId, status, '', {
-      price: price || '',
+    getShop(req.params.shopId);
+    const { status, renterName, renterPhone, expectedReturn, price } = req.body || {};
+    const result = await setBikeStatus(req.params.bikeId, status, null, {
+      renterName,
+      renterPhone,
+      expectedReturn,
+      price,
       loggedBy: auth.user,
-      renterName: renterName || '',
-      renterPhone: renterPhone || '',
-      rentedDate: rentedDate || '',
-      expectedReturn: expectedReturn || '',
     });
-    if (result.ok) {
-      console.log(`${auth.user} marked ${req.params.bikeId} as ${status} via Operations OS`);
-    }
-    if (!result.ok) return res.status(404).json(result);
+    if (!result.ok) return res.status(400).json(result);
     res.json(result);
   } catch (err) {
-    console.error('Update bike status error:', err.message);
-    const httpStatus = err.message.startsWith('Unknown shop') ? 404 : 500;
-    res.status(httpStatus).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
 app.get('/api/:shopId/motorbikes/:bikeId/history', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const auth = checkDashboardAuth(req);
-    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
-    const shop = getShop(req.params.shopId);
-    const bikes = await getFleetList();
-    const bike = bikes.find(b => b.bikeId === req.params.bikeId);
-    if (!bike) return res.status(404).json({ error: 'Bike not found' });
+    getShop(req.params.shopId);
     const history = await getRentalHistoryForBike(req.params.bikeId);
-    res.json({ bike, history, updatedAt: new Date().toISOString() });
+    res.json({ history });
   } catch (err) {
-    console.error('Bike history API error:', err.message);
-    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
-    res.status(status).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
 app.get('/api/:shopId/rentals', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const auth = checkDashboardAuth(req);
-    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
-    const shop = getShop(req.params.shopId);
-    const bookings = await getRecentBookings(50);
-    res.json({ shop: shop.name, bookings, updatedAt: new Date().toISOString() });
+    getShop(req.params.shopId);
+    const bookings = db.getActiveRentals();
+    res.json({ bookings });
   } catch (err) {
-    console.error('Rentals API error:', err.message);
-    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
-    res.status(status).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
 app.get('/api/:shopId/dashboard', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const auth = checkDashboardAuth(req);
-    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
-    const shop = getShop(req.params.shopId);
-    const stats = await getDashboardStats(shop);
-    res.json({ shop: shop.name, ...stats, updatedAt: new Date().toISOString() });
+    getShop(req.params.shopId);
+    const data = await getDashboardStats();
+    res.json(data);
   } catch (err) {
-    console.error('Dashboard API error:', err.message);
-    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
-    res.status(status).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
 app.get('/api/:shopId/tasks', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const auth = checkDashboardAuth(req);
-    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
-    const shop = getShop(req.params.shopId);
+    getShop(req.params.shopId);
     const tasks = await getTasks();
-    res.json({ shop: shop.name, tasks, updatedAt: new Date().toISOString() });
+    res.json({ tasks });
   } catch (err) {
-    console.error('Tasks API error:', err.message);
-    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
-    res.status(status).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
 app.post('/api/:shopId/tasks/:taskId/resolve', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const auth = checkDashboardAuth(req);
-    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
-    const shop = getShop(req.params.shopId);
-    const taskId = parseInt(req.params.taskId, 10);
-    if (!taskId || taskId < 1) { return res.status(400).json({ error: 'Invalid task id' }); }
-    const result = await resolveTask(taskId);
-    console.log(`${auth.user} marked task ${taskId} as Resolved`);
+    getShop(req.params.shopId);
+    const result = await resolveTask(req.params.taskId);
     res.json(result);
   } catch (err) {
-    console.error('Resolve task error:', err.message);
-    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
-    res.status(status).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
 app.get('/api/:shopId/data-quality', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const auth = checkDashboardAuth(req);
-    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
-    const shop = getShop(req.params.shopId);
+    getShop(req.params.shopId);
     const report = await getBookingsWithIssues();
-    res.json({ shop: shop.name, ...report, updatedAt: new Date().toISOString() });
+    res.json(report);
   } catch (err) {
-    console.error('Data quality API error:', err.message);
-    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
-    res.status(status).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
 app.get('/api/:shopId/rental-history', async (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const auth = checkDashboardAuth(req);
-    if (!auth.ok) { return res.status(401).json({ error: 'Unauthorized' }); }
-    const shop = getShop(req.params.shopId);
+    getShop(req.params.shopId);
     const history = await getAllRentalHistory();
-    res.json({ shop: shop.name, history, updatedAt: new Date().toISOString() });
+    res.json({ history });
   } catch (err) {
-    console.error('Rental history API error:', err.message);
-    const status = err.message.startsWith('Unknown shop') ? 404 : 500;
-    res.status(status).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
+function dashboardShell(token, title, bodyAttrs, bodyHTML) {
+  const active = page =>
+    title.includes(page)
+      ? ' bg-secondary-container text-on-secondary-container rounded-lg'
+      : ' text-on-surface-variant hover:bg-surface-container-high transition-colors rounded-lg';
+  const t = encodeURIComponent(token);
+  return '<!DOCTYPE html><html class="light" lang="en"><head>' +
+    '<meta charset="utf-8">' +
+    '<meta content="width=device-width, initial-scale=1.0" name="viewport">' +
+    '<title>' + title + ' - TOH Rental</title>' +
+    '<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>' +
+    '<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">' +
+    '<link href="https://fonts.googleapis.com" rel="preconnect">' +
+    '<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">' +
+    '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">' +
+    '<script id="tailwind-config">tailwind.config={darkMode:"class",theme:{extend:{"colors":{"outline-variant":"#c1c6d7","background":"#faf8ff","surface-container":"#eaedff","primary-container":"#0070eb","surface-bright":"#faf8ff","on-surface-variant":"#414755","surface-container-low":"#f2f3ff","on-background":"#131b2e","surface-container-lowest":"#ffffff","outline":"#717786","secondary-container":"#d5e3fd","on-surface":"#131b2e","surface":"#faf8ff","surface-tint":"#005bc1","secondary":"#515f74","surface-container-high":"#e2e7ff","surface-container-highest":"#dae2fd","primary":"#0058bc","on-primary":"#ffffff","on-primary-container":"#fefcff","on-secondary-container":"#57657b","error":"#ba1a1a"},"borderRadius":{"DEFAULT":"0.125rem","lg":"0.25rem","xl":"0.5rem","full":"0.75rem"},"spacing":{"gutter":"16px","md":"16px","xs":"8px","base":"4px","margin-mobile":"16px","margin-desktop":"32px","sm":"12px","xl":"32px","lg":"24px"},"fontFamily":{"status-badge":["Inter"],"headline-md":["Inter"],"body-md":["Inter"],"body-lg":["Inter"],"label-caps":["JetBrains Mono"],"headline-lg":["Inter"]},"fontSize":{"status-badge":["12px",{"lineHeight":"12px","fontWeight":"700"}],"headline-md":["20px",{"lineHeight":"28px","fontWeight":"600"}],"body-md":["14px",{"lineHeight":"20px","fontWeight":"400"}],"label-caps":["12px",{"lineHeight":"16px","letterSpacing":"0.05em","fontWeight":"600"}],"headline-lg":["24px",{"lineHeight":"32px","fontWeight":"600"}]}}}};</script>' +
+    '<style>.material-symbols-outlined{font-variation-settings:"FILL" 0,"wght" 400,"GRAD" 0,"opsz" 24}.no-scrollbar::-webkit-scrollbar{display:none}.no-scrollbar{-ms-overflow-style:none;scrollbar-width:none}body{min-height:max(884px,100dvh)}.pill-available{background:#dcfce7;color:#166534;border:1px solid #bbf7d0}.pill-rented{background:#dbeafe;color:#1e40af;border:1px solid #bfdbfe}.pill-maintenance{background:#fef3c7;color:#92400e;border:1px solid #fde68a}.pill-reserved{background:#ede9fe;color:#5b21b6;border:1px solid #ddd6fe}.pill-active{background:#dbeafe;color:#1e40af;border:1px solid #bfdbfe}.pill-done{background:#f3f4f6;color:#374151;border:1px solid #e5e7eb}.pill-open{background:#fef3c7;color:#92400e;border:1px solid #fde68a}.pill-resolved{background:#dcfce7;color:#166534;border:1px solid #bbf7d0}</style>' +
+    '</head><body class="bg-surface text-on-surface font-body-md min-h-screen flex flex-col md:flex-row"' + (bodyAttrs || '') + '>' +
+    '<header class="flex justify-between items-center w-full px-margin-mobile h-16 z-50 bg-surface border-b border-outline-variant md:hidden sticky top-0"><h1 class="font-headline-lg text-headline-lg font-bold text-primary tracking-tight">TOH Rental</h1></header>' +
+    '<aside class="hidden md:flex flex-col h-full py-lg gap-xs bg-surface border-r border-outline-variant fixed left-0 top-0 w-[280px] z-40 overflow-y-auto no-scrollbar"><div class="px-4 mb-6"><h1 class="font-headline-md text-headline-md text-primary mb-6">TOH Rental</h1></div><nav class="flex flex-col gap-2">' +
+    '<a class="flex items-center gap-4' + active('Overview') + ' px-4 py-3 mx-2" href="/overview?token=' + t + '"><span class="material-symbols-outlined">dashboard</span><span class="font-label-caps text-label-caps">Overview</span></a>' +
+    '<a class="flex items-center gap-4' + active('Motorbikes') + ' px-4 py-3 mx-2" href="/motorbikes?token=' + t + '"><span class="material-symbols-outlined">two_wheeler</span><span class="font-label-caps text-label-caps">Motorbikes</span></a>' +
+    '<a class="flex items-center gap-4' + active('Rentals') + ' px-4 py-3 mx-2" href="/rentals?token=' + t + '"><span class="material-symbols-outlined">receipt_long</span><span class="font-label-caps text-label-caps">Rentals</span></a>' +
+    '<a class="flex items-center gap-4' + active('AI Task') + ' px-4 py-3 mx-2" href="/ai-tasks?token=' + t + '"><span class="material-symbols-outlined">smart_toy</span><span class="font-label-caps text-label-caps">AI Tasks</span></a>' +
+    '<a class="flex items-center gap-4' + active('Data Quality') + ' px-4 py-3 mx-2" href="/data-quality?token=' + t + '"><span class="material-symbols-outlined">verified</span><span class="font-label-caps text-label-caps">Data Quality</span></a>' +
+    '<a class="flex items-center gap-4' + active('Rental History') + ' px-4 py-3 mx-2" href="/rental-history?token=' + t + '"><span class="material-symbols-outlined">history</span><span class="font-label-caps text-label-caps">Rental History</span></a>' +
+    '</nav></aside>' + bodyHTML + '</body></html>';
+}
+
 app.get('/overview', (req, res) => {
   const auth = checkDashboardAuth(req);
-  if (!auth.ok) { return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.'); }
+  if (!auth.ok) return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
   const token = req.query.token || '';
-  res.send(`<!DOCTYPE html><html class="light" lang="en"><head>
-<meta charset="utf-8">
-<meta content="width=device-width, initial-scale=1.0" name="viewport">
-<title>Overview - TOH Rental</title>
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
-<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com" rel="preconnect">
-<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
-<script id="tailwind-config">
-  tailwind.config = {
-    darkMode: "class",
-    theme: { extend: {
-      "colors": {
-        "outline-variant": "#c1c6d7", "background": "#faf8ff", "surface-container": "#eaedff",
-        "primary-container": "#0070eb", "surface-bright": "#faf8ff", "on-surface-variant": "#414755",
-        "surface-container-low": "#f2f3ff", "on-background": "#131b2e", "surface-container-lowest": "#ffffff",
-        "outline": "#717786", "secondary-container": "#d5e3fd", "on-surface": "#131b2e",
-        "surface": "#faf8ff", "surface-tint": "#005bc1", "secondary": "#515f74",
-        "surface-container-high": "#e2e7ff", "surface-container-highest": "#dae2fd",
-        "primary": "#0058bc", "on-primary": "#ffffff", "on-primary-container": "#fefcff",
-        "on-secondary-container": "#57657b", "error": "#ba1a1a"
-      },
-      "borderRadius": { "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem" },
-      "spacing": { "gutter": "16px", "md": "16px", "xs": "8px", "base": "4px", "margin-mobile": "16px", "margin-desktop": "32px", "sm": "12px", "xl": "32px", "lg": "24px" },
-      "fontFamily": { "status-badge": ["Inter"], "headline-md": ["Inter"], "body-md": ["Inter"], "body-lg": ["Inter"], "label-caps": ["JetBrains Mono"], "headline-lg": ["Inter"] },
-      "fontSize": {
-        "status-badge": ["12px", { "lineHeight": "12px", "fontWeight": "700" }],
-        "headline-md": ["20px", { "lineHeight": "28px", "fontWeight": "600" }],
-        "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
-        "label-caps": ["12px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "600" }],
-        "headline-lg": ["24px", { "lineHeight": "32px", "fontWeight": "600" }]
-      }
-    } }
-  }
-</script>
-<style>
-  .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
-  .no-scrollbar::-webkit-scrollbar { display: none; }
-  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-  body { min-height: max(884px, 100dvh); }
-</style>
-</head>
-<body class="bg-surface text-on-surface font-body-md min-h-screen flex flex-col md:flex-row">
-<header class="flex justify-between items-center w-full px-margin-mobile h-16 z-50 bg-surface border-b border-outline-variant md:hidden sticky top-0">
-<h1 class="font-headline-lg text-headline-lg font-bold text-primary tracking-tight">TOH Rental</h1>
-</header>
-<aside class="hidden md:flex flex-col h-full py-lg gap-xs bg-surface border-r border-outline-variant fixed left-0 top-0 w-[280px] z-40 overflow-y-auto no-scrollbar">
-<div class="px-4 mb-6">
-<h1 class="font-headline-md text-headline-md text-primary mb-6">TOH Rental</h1>
-</div>
-<nav class="flex flex-col gap-2">
-<a class="flex items-center gap-4 bg-secondary-container text-on-secondary-container rounded-lg px-4 py-3 mx-2" href="#">
-<span class="material-symbols-outlined">dashboard</span>
-<span class="font-label-caps text-label-caps">Overview</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/motorbikes?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">two_wheeler</span>
-<span class="font-label-caps text-label-caps">Motorbikes</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rentals?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">receipt_long</span>
-<span class="font-label-caps text-label-caps">Rentals</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/ai-tasks?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">smart_toy</span>
-<span class="font-label-caps text-label-caps">AI Tasks</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/data-quality?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">verified</span>
-<span class="font-label-caps text-label-caps">Data Quality</span>
-</a>
-<a class="flex items-center gap-4 text-on-surface-variant px-4 py-3 mx-2 hover:bg-surface-container-high transition-colors rounded-lg" href="/rental-history?token=${encodeURIComponent(token)}">
-<span class="material-symbols-outlined">history</span>
-<span class="font-label-caps text-label-caps">Rental History</span>
-</a>
-</nav>
-</aside>
-<main class="flex-1 md:ml-[280px] pb-24 md:pb-8">
-<header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0">
-<h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Overview</h2>
-</header>
-<div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6">
-<div class="grid grid-cols-2 md:grid-cols-4 gap-4" id="stats"></div>
-<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-<div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6">
-<h3 class="font-headline-md text-headline-md mb-4">Recent Rentals</h3>
-<div id="recentBookings" class="text-on-surface-variant text-sm space-y-3"></div>
-</div>
-<div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6">
-<h3 class="font-headline-md text-headline-md mb-4">Fleet Status</h3>
-<div id="fleetStatus" class="space-y-3"></div>
-</div>
-</div>
-</div>
-</main>
-<script>
-  const TOKEN = ${JSON.stringify(token)};
-  async function load() {
-    try {
-      const res = await fetch('/api/toh/dashboard' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
-      const d = await res.json();
-      if (d.error) { document.getElementById('stats').innerHTML = '<span class="text-error">' + d.error + '</span>'; return; }
-      const f = d.fleet || {};
-      document.getElementById('stats').innerHTML = [
-        { label: 'Active Rentals', value: d.activeRentals || 0, color: 'bg-amber-500' },
-        { label: 'Available', value: f.available || 0, color: 'bg-emerald-500' },
-        { label: 'Rented', value: f.rented || 0, color: 'bg-blue-500' },
-        { label: 'AI Tasks', value: d.openTasks || 0, color: 'bg-violet-500' },
-      ].map(s => '<div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-4"><div class="text-2xl font-bold">' + s.value + '</div><div class="text-xs text-on-surface-variant mt-1">' + s.label + '</div></div>').join('');
-      const rb = d.recentBookings || [];
-      document.getElementById('recentBookings').innerHTML = rb.length ? rb.map(b => '<div class="flex justify-between items-center py-2 border-b border-outline-variant last:border-0"><div><span class="font-semibold">' + (b.customer_name || b.name || '-') + '</span><br><span class="text-xs">' + (b.bike_type || b.bike || '-') + '</span></div><div class="text-right text-xs"><div>' + (b.start_date || b.startDate || '') + ' - ' + (b.end_date || b.endDate || '') + '</div><div class="font-semibold mt-1">' + (b.price || '-') + '</div></div></div>').join('') : '<div class="text-sm">No recent bookings</div>';
-      document.getElementById('fleetStatus').innerHTML = '<div class="flex items-center gap-2"><div class="w-full bg-outline-variant rounded-full h-2"><div class="bg-emerald-500 h-2 rounded-full" style="width:' + (f.total ? (f.available/f.total*100) : 0) + '%"></div></div><span class="text-xs whitespace-nowrap">' + (f.available || 0) + '/' + (f.total || 0) + ' avail</span></div><div class="flex justify-between text-xs text-on-surface-variant"><span>Rented: ' + (f.rented || 0) + '</span><span>Other: ' + (f.other || 0) + '</span></div>';
-    } catch (err) { document.getElementById('stats').innerHTML = '<span class="text-error">Failed to load</span>'; }
-  }
-  load();
-  setInterval(load, 30000);
-</script>
-</body></html>`);
+  res.send(dashboardShell(token, 'Overview', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Overview</h2></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6"><div class="grid grid-cols-2 md:grid-cols-4 gap-4" id="stats"></div><div class="grid grid-cols-1 lg:grid-cols-2 gap-6"><div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6"><h3 class="font-headline-md text-headline-md mb-4">Active Rentals</h3><div id="activeRentals" class="text-on-surface-variant text-sm space-y-3"></div></div><div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6"><h3 class="font-headline-md text-headline-md mb-4">Fleet Status</h3><div id="fleetStatus" class="space-y-3"></div></div></div><div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6"><h3 class="font-headline-md text-headline-md mb-4">Pending AI Reviews</h3><div id="pendingTasks" class="text-on-surface-variant text-sm space-y-2"></div></div></div></main><script>const TOKEN=' + JSON.stringify(token) + ';async function load(){try{const [dRes,tRes,bRes]=await Promise.all([fetch("/api/toh/dashboard"+(TOKEN?"?token="+encodeURIComponent(TOKEN):"")),fetch("/api/toh/tasks"+(TOKEN?"?token="+encodeURIComponent(TOKEN):"")),fetch("/api/toh/motorbikes"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""))]);const d=await dRes.json(),tasks=await tRes.json(),mb=await bRes.json();if(d.error){document.getElementById("stats").innerHTML="<span class=\\"text-error\\">"+d.error+"</span>";return;}const f=d.fleet||{};const bikes=mb.bikes||[];document.getElementById("stats").innerHTML=[{label:"Active Rentals",value:d.activeRentals||0,icon:"receipt_long",color:"#3b82f6"},{label:"Available Now",value:f.available||0,icon:"check_circle",color:"#10b981"},{label:"Currently Rented",value:f.rented||0,icon:"directions_bike",color:"#6366f1"},{label:"Today Income",value:(d.finance?d.finance.income.toLocaleString():"0")+" THB",icon:"payments",color:"#f59e0b"}].map(function(s){return "<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col gap-1\\"><div class=\\"flex items-center gap-2\\"><span class=\\"material-symbols-outlined text-sm\\" style=\\"color:"+s.color+"\\">"+s.icon+"</span><span class=\\"text-xs text-on-surface-variant\\">"+s.label+"</span></div><div class=\\"text-2xl font-bold font-label-caps tracking-tight\\">"+s.value+"</div></div>";}).join("");const rentedBikes=bikes.filter(function(b){return b.status==="Rented";});document.getElementById("activeRentals").innerHTML=rentedBikes.length?rentedBikes.map(function(b){return "<div class=\\"flex justify-between items-center py-2 border-b border-outline-variant last:border-0\\"><div><span class=\\"font-semibold font-label-caps\\">"+b.bikeId+"</span> <span class=\\"text-xs\\">"+b.model+"</span></div><span class=\\"pill-rented text-xs px-2 py-1 rounded-full font-status-badge\\">Rented</span></div>";}).join(""):"<div class=\\"text-sm\\">No active rentals</div>";const pct=f.total?Math.round(f.available/f.total*100):0;document.getElementById("fleetStatus").innerHTML="<div class=\\"flex items-center gap-3 mb-3\\"><div class=\\"flex-1 bg-outline-variant rounded-full h-3\\"><div class=\\"bg-emerald-500 h-3 rounded-full transition-all\\" style=\\"width:"+pct+"%\\"></div></div><span class=\\"text-sm font-label-caps\\">"+(f.available||0)+"/"+(f.total||0)+"</span></div><div class=\\"grid grid-cols-3 gap-3 text-center\\"><div class=\\"bg-emerald-50 rounded-lg p-3\\"><div class=\\"text-lg font-bold text-emerald-700 font-label-caps\\">"+(f.available||0)+"</div><div class=\\"text-xs text-emerald-600\\">Available</div></div><div class=\\"bg-blue-50 rounded-lg p-3\\"><div class=\\"text-lg font-bold text-blue-700 font-label-caps\\">"+(f.rented||0)+"</div><div class=\\"text-xs text-blue-600\\">Rented</div></div><div class=\\"bg-amber-50 rounded-lg p-3\\"><div class=\\"text-lg font-bold text-amber-700 font-label-caps\\">"+(f.other||0)+"</div><div class=\\"text-xs text-amber-600\\">Other</div></div></div>";const openTasks=(tasks.tasks||[]).filter(function(t){return t.status==="Open";});document.getElementById("pendingTasks").innerHTML=openTasks.length?openTasks.slice(0,5).map(function(t){return "<div class=\\"flex justify-between items-center py-2 border-b border-outline-variant last:border-0\\"><div><span class=\\"text-xs px-2 py-0.5 rounded-full font-status-badge "+(t.type.indexOf(\"Contract\")>=0?\"pill-maintenance\":\"pill-open\")+"\\">"+t.type+"</span></div><div class=\\"text-xs truncate max-w-[250px]\\">"+(t.description||"").split("\\n")[0].substring(0,80)+"</div><div class=\\"text-xs text-on-surface-variant\\">"+(t.date||"")+"</div></div>";}).join(""):"<div class=\\"text-sm\\">No pending tasks</div>";}catch(err){document.getElementById("stats").innerHTML="<span class=\\"text-error\\">Failed to load</span>";}}load();setInterval(load,30000);</script>'));
+});
+
+app.get('/dashboard', (req, res) => {
+  const token = req.query.token || '';
+  res.redirect('/overview' + (token ? '?token=' + encodeURIComponent(token) : ''));
+});
+
+app.get('/motorbikes', (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  const token = req.query.token || '';
+  res.send(dashboardShell(token, 'Motorbikes Inventory', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Motorbikes</h2><div class="flex items-center gap-3"><select id="statusFilter" class="text-sm border border-outline-variant rounded-lg px-3 py-1.5 bg-surface" onchange="render()"><option value="all">All Statuses</option><option value="Available">Available</option><option value="Rented">Rented</option><option value="Maintenance">Maintenance</option><option value="Reserved">Reserved</option></select></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-4"><div class="flex justify-between items-center"><div id="bikeCount" class="text-sm text-on-surface-variant"></div></div><div id="grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div></div></main><script>var TOKEN=' + JSON.stringify(token) + ';var allBikes=[];var pill={Available:"pill-available",Rented:"pill-rented",Maintenance:"pill-maintenance",Reserved:"pill-reserved"};async function load(){try{var res=await fetch("/api/toh/motorbikes"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var data=await res.json();if(data.error){document.getElementById("grid").innerHTML="<div class=\\"col-span-full text-error\\">"+data.error+"</div>";return;}allBikes=data.bikes||[];render();}catch(err){document.getElementById("grid").innerHTML="<div class=\\"col-span-full text-error\\">Failed to load</div>";}}function render(){var f=document.getElementById("statusFilter").value;var bikes=f==="all"?allBikes:allBikes.filter(function(b){return b.status===f;});document.getElementById("bikeCount").textContent=bikes.length+" bike"+(bikes.length!==1?"s":"");document.getElementById("grid").innerHTML=bikes.map(function(b){var p=pill[b.status]||"pill-done";return "<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4 hover:shadow-sm transition-shadow\\"><div class=\\"flex justify-between items-start mb-2\\"><div><div class=\\"font-label-caps text-lg text-primary\\">"+b.bikeId+"</div><div class=\\"text-sm font-semibold mt-0.5\\">"+b.model+"</div></div><span class=\\"text-xs px-2 py-1 rounded-full font-status-badge "+p+"\\">"+b.status+"</span></div><div class=\\"text-xs text-on-surface-variant space-y-1\\"><div class=\\"flex gap-4\\"><span>Location: "+(b.location||"Chaweng")+"</span>"+(b.color?"<span>Color: "+b.color+"</span>":"")+"</div>"+(b.notes?"<div class=\\"text-on-surface-variant italic opacity-60\\">"+b.notes+"</div>":"")+"</div></div>";}).join("");}load();setInterval(load,60000);</script>'));
+});
+
+app.get('/rentals', (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  const token = req.query.token || '';
+  res.send(dashboardShell(token, 'Rentals', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Rentals</h2><div class="flex items-center gap-3"><select id="statusFilter" class="text-sm border border-outline-variant rounded-lg px-3 py-1.5 bg-surface" onchange="renderRentals()"><option value="all">All</option><option value="active" selected>Active</option><option value="done">Completed</option></select></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-3"><div id="rentalList" class="space-y-3"></div></div></main><script>var TOKEN=' + JSON.stringify(token) + ';var allRentals=[];async function loadRentals(){try{var bRes=await fetch("/api/toh/motorbikes"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var bikes=(await bRes.json()).bikes||[];allRentals=bikes.filter(function(b){return b.status==="Rented";}).map(function(b){return {plate:b.bikeId,model:b.model,renter:b.renterName||"-",status:"active",start:b.rentedDate,end:b.expectedReturn};});try{var hRes=await fetch("/api/toh/rental-history"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var history=(await hRes.json()).history||[];history.forEach(function(h){allRentals.push({plate:h.bike_id,model:h.model||"-",renter:h.renter_name||"-",status:"done",start:h.start_date,end:h.end_date,days:h.days,price:h.price});});}catch(e){}renderRentals();}catch(err){document.getElementById("rentalList").innerHTML="<div class=\\"text-error\\">Failed to load</div>";}}function renderRentals(){var f=document.getElementById("statusFilter").value;var items=f==="all"?allRentals:allRentals.filter(function(r){return r.status===f;});document.getElementById("rentalList").innerHTML=items.length?items.map(function(r){return "<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex items-center gap-4\\"><div class=\\"font-label-caps text-primary font-bold min-w-[60px]\\">"+r.plate+"</div><div class=\\"flex-1\\"><div class=\\"font-semibold text-sm\\">"+r.renter+"</div><div class=\\"text-xs text-on-surface-variant\\">"+r.model+(r.start?" · "+r.start+" -> "+r.end:"")+(r.days?" · "+r.days+"d":"")+"</div></div><div class=\\"text-right\\"><span class=\\"text-xs px-2 py-1 rounded-full font-status-badge "+(r.status==="active"?"pill-active":"pill-done")+"\\">"+(r.status==="active"?"Active":"Done")+"</span>"+(r.price?"<div class=\\"text-sm font-semibold mt-1 font-label-caps\\">"+r.price+" THB</div>":"")+"</div></div>";}).join(""):"<div class=\\"text-on-surface-variant text-sm text-center py-8\\">No rentals found</div>";}loadRentals();setInterval(loadRentals,60000);</script>'));
+});
+
+app.get('/ai-tasks', (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  const token = req.query.token || '';
+  res.send(dashboardShell(token, 'AI Task Queue', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">AI Task Queue</h2><div id="taskCount" class="text-sm text-on-surface-variant"></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-3"><div id="taskList" class="space-y-3"></div></div></main><script>var TOKEN=' + JSON.stringify(token) + ';async function loadTasks(){try{var res=await fetch("/api/toh/tasks"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var data=await res.json();if(data.error){document.getElementById("taskList").innerHTML="<div class=\\"text-error\\">"+data.error+"</div>";return;}var tasks=data.tasks||[];var open=tasks.filter(function(t){return t.status==="Open";});document.getElementById("taskCount").textContent=open.length+" open · "+tasks.length+" total";document.getElementById("taskList").innerHTML=tasks.length?tasks.map(function(t){var isOpen=t.status==="Open";var descLines=(t.description||"-").split("\\n");return "<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4"+(!isOpen?" opacity-60":"")+"\\"><div class=\\"flex justify-between items-start mb-2\\"><div class=\\"flex items-center gap-2\\"><span class=\\"text-xs px-2 py-1 rounded-full font-status-badge "+(t.type.indexOf(\"Contract\")>=0?\"pill-maintenance\":\"pill-open\")+"\\">"+t.type+"</span><span class=\\"text-xs text-on-surface-variant\\">"+(t.date||"")+"</span></div><span class=\\"text-xs px-2 py-1 rounded-full font-status-badge "+(isOpen?\"pill-open\":\"pill-resolved\")+"\\">"+t.status+"</span></div><div class=\\"text-sm mb-2\\">"+descLines.map(function(l){return "<div>"+l+"</div>";}).join("")+"</div><div class=\\"text-xs text-on-surface-variant mb-3\\">Contact: "+(t.contact||"-")+"</div>"+(isOpen?"<div class=\\"flex gap-2\\"><button class=\\"text-xs px-4 py-2 bg-primary text-on-primary rounded-lg font-status-badge hover:opacity-90\\" onclick=\\"resolveTaskRow("+t.id+")\\">Mark Resolved</button></div>":"<div class=\\"text-xs text-on-surface-variant\\">Resolved: "+(t.resolvedAt||"-")+"</div>")+"</div>";}).join(""):"<div class=\\"text-on-surface-variant text-sm text-center py-12\\">No tasks yet</div>";}catch(err){document.getElementById("taskList").innerHTML="<div class=\\"text-error\\">Failed to load</div>";}}async function resolveTaskRow(id){try{await fetch("/api/toh/tasks/"+id+"/resolve"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""),{method:"POST"});loadTasks();}catch(e){}}loadTasks();setInterval(loadTasks,30000);</script>'));
+});
+
+app.get('/data-quality', (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  const token = req.query.token || '';
+  res.send(dashboardShell(token, 'Data Quality Report', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Data Quality</h2></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6"><div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6"><h3 class="font-headline-md text-headline-md mb-4">Booking Issues</h3><div id="summary" class="text-sm text-on-surface-variant mb-4"></div><div id="bookingIssues" class="space-y-3"></div></div><div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6"><h3 class="font-headline-md text-headline-md mb-4">Fleet Issues</h3><div id="fleetIssues" class="space-y-3"></div></div></div></main><script>var TOKEN=' + JSON.stringify(token) + ';async function loadDQ(){try{var dqRes=await fetch("/api/toh/data-quality"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var mbRes=await fetch("/api/toh/motorbikes"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var dq=await dqRes.json(),mb=await mbRes.json();var issues=dq.issues||[];document.getElementById("summary").textContent=issues.length?issues.length+" of "+(dq.totalRows||0)+" booking rows flagged":"All booking rows look clean";document.getElementById("bookingIssues").innerHTML=issues.length?issues.map(function(r){return "<div class=\\"border border-outline-variant rounded-lg p-3\\"><div class=\\"flex justify-between items-start\\"><span class=\\"font-semibold text-sm\\">Row "+r.row+" — "+(r.name||"Unknown")+" · "+(r.bike||"-")+"</span><span class=\\"text-xs text-on-surface-variant\\">"+(r.date||"")+"</span></div><div class=\\"flex flex-wrap gap-1 mt-2\\">"+r.problems.map(function(p){return "<span class=\\"text-xs px-2 py-1 rounded-full pill-maintenance\\">"+p+"</span>";}).join("")+"</div></div>";}).join(""):"<div class=\\"text-sm text-on-surface-variant\\">No booking issues found</div>";var bikes=mb.bikes||[];var fleetProbs=bikes.filter(function(b){return !b.model||!b.location||(b.status==="Maintenance"&&!b.notes);});document.getElementById("fleetIssues").innerHTML=fleetProbs.length?fleetProbs.map(function(b){var probs=[];if(!b.model)probs.push("Missing model");if(!b.location)probs.push("Missing location");if(b.status==="Maintenance"&&!b.notes)probs.push("Maintenance without reason");return "<div class=\\"border border-outline-variant rounded-lg p-3\\"><div class=\\"flex justify-between items-start\\"><span class=\\"font-label-caps text-primary font-bold\\">"+b.bikeId+"</span><span class=\\"text-xs px-2 py-1 rounded-full font-status-badge pill-maintenance\\">"+b.status+"</span></div><div class=\\"flex flex-wrap gap-1 mt-2\\">"+probs.map(function(p){return "<span class=\\"text-xs px-2 py-1 rounded-full pill-open\\">"+p+"</span>";}).join("")+"</div></div>";}).join(""):"<div class=\\"text-sm text-on-surface-variant\\">All fleet records look complete</div>";}catch(err){document.getElementById("summary").textContent="Failed to load data";}}loadDQ();</script>'));
+});
+
+app.get('/rental-history', (req, res) => {
+  const auth = checkDashboardAuth(req);
+  if (!auth.ok) return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  const token = req.query.token || '';
+  res.send(dashboardShell(token, 'Rental History', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Rental History</h2><div class="flex items-center gap-3"><input id="searchInput" class="text-sm border border-outline-variant rounded-lg px-3 py-1.5 bg-surface w-[200px]" placeholder="Search plate or name..." oninput="renderHistory()"></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-3"><div id="count" class="text-sm text-on-surface-variant"></div><div id="historyList" class="space-y-3"></div></div></main><script>var TOKEN=' + JSON.stringify(token) + ';var allHistory=[];async function loadHistory(){try{var res=await fetch("/api/toh/rental-history"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var data=await res.json();if(data.error){document.getElementById("historyList").innerHTML="<div class=\\"text-error\\">"+data.error+"</div>";return;}allHistory=data.history||[];renderHistory();}catch(err){document.getElementById("historyList").innerHTML="<div class=\\"text-error\\">Failed to load</div>";}}function renderHistory(){var q=(document.getElementById("searchInput").value||"").toLowerCase();var items=q?allHistory.filter(function(h){return (h.bike_id||"").toLowerCase().indexOf(q)>=0||(h.renter_name||"").toLowerCase().indexOf(q)>=0;}):allHistory;document.getElementById("count").textContent=items.length+" rental"+(items.length!==1?"s":"")+" logged";document.getElementById("historyList").innerHTML=items.length?items.map(function(h){return "<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-wrap items-center gap-3\\"><div class=\\"font-label-caps text-primary font-bold min-w-[50px]\\">"+(h.bike_id||"-")+"</div><div class=\\"flex-1 min-w-0\\"><div class=\\"font-semibold text-sm\\">"+(h.renter_name||"-")+"</div><div class=\\"text-xs text-on-surface-variant\\">"+(h.start_date||"")+" -> "+(h.end_date||"")+(h.days?" · "+h.days+" days":"")+"</div></div><div class=\\"flex items-center gap-3 ml-auto\\"><div class=\\"text-sm font-semibold font-label-caps\\">"+(h.price?h.price+" THB":"-")+"</div><div class=\\"text-xs text-on-surface-variant\\">"+(h.date_logged||"")+"</div></div></div>";}).join(""):"<div class=\\"text-on-surface-variant text-sm text-center py-12\\">No rental history yet</div>";}loadHistory();setInterval(loadHistory,120000);</script>'));
 });
 
 app.listen(3000, () => console.log('TOH Rental Bot running on port 3000'));
