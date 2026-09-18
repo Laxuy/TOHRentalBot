@@ -123,6 +123,16 @@ function createTables() {
       edited_by TEXT DEFAULT '',
       created_at TEXT DEFAULT (datetime('now','localtime'))
     );
+
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('staff','boss','admin')),
+      staff_id INTEGER REFERENCES staff(id),
+      created_at TEXT DEFAULT (datetime('now','localtime')),
+      last_login_at TEXT DEFAULT ''
+    );
   `);
 }
 
@@ -453,6 +463,48 @@ function editStaffHours(id, todayHours, weekHours, editedBy) {
   return { ok: true };
 }
 
+// ─── Users (login) ───────────────────────────────────────────
+
+function getUserByUsername(username) {
+  const db = getDb();
+  return db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+}
+
+function getUserById(id) {
+  const db = getDb();
+  return db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+}
+
+function createUser({ username, passwordHash, role, staffId }) {
+  const db = getDb();
+  const info = db.prepare(`
+    INSERT INTO users (username, password_hash, role, staff_id)
+    VALUES (?, ?, ?, ?)
+  `).run(username, passwordHash, role, staffId || null);
+  return { ok: true, id: info.lastInsertRowid };
+}
+
+function updateUserLastLogin(id) {
+  const db = getDb();
+  const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
+  db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(now, id);
+}
+
+function getAllUsers() {
+  const db = getDb();
+  return db.prepare(`
+    SELECT u.id, u.username, u.role, u.last_login_at, s.name as staff_name
+    FROM users u LEFT JOIN staff s ON u.staff_id = s.id
+    ORDER BY u.role DESC, u.username
+  `).all();
+}
+
+function deleteUser(id) {
+  const db = getDb();
+  db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  return { ok: true };
+}
+
 module.exports = {
   getDb,
   // motorbikes
@@ -495,4 +547,11 @@ module.exports = {
   setStaffLeave,
   updateStaffShift,
   editStaffHours,
+  // users
+  getUserByUsername,
+  getUserById,
+  createUser,
+  updateUserLastLogin,
+  getAllUsers,
+  deleteUser,
 };
