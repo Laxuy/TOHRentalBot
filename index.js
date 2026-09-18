@@ -1,11 +1,20 @@
 const express = require('express');
 const axios = require('axios');
+const bcrypt = require('bcryptjs');
+const session = require('express-session');
 const { extractContractData, shouldAutoFill, describeExtraction } = require('./contractExtractor');
 const { getShop } = require('./config/shops');
 const db = require('./database');
 require('dotenv').config();
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'change-this-in-railway-env-vars',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { maxAge: 7 * 24 * 60 * 60 * 1000 }, // 7 days
+}));
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
@@ -21,12 +30,73 @@ const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || '';
 const BOSS_TOKEN = process.env.BOSS_TOKEN || '';
 
 function checkDashboardAuth(req) {
+  if (req.session && req.session.user) {
+    return { ok: true, user: req.session.user.username, role: req.session.user.role };
+  }
   const token = req.query.token || '';
-  if (!DASHBOARD_TOKEN) return { ok: true, user: 'Unknown (no token set)' };
-  if (token === DASHBOARD_TOKEN) return { ok: true, user: 'Kris' };
-  if (BOSS_TOKEN && token === BOSS_TOKEN) return { ok: true, user: 'TOH' };
+  if (!DASHBOARD_TOKEN) return { ok: true, user: 'Unknown (no token set)', role: 'boss' };
+  if (token === DASHBOARD_TOKEN) return { ok: true, user: 'Kris', role: 'boss' };
+  if (BOSS_TOKEN && token === BOSS_TOKEN) return { ok: true, user: 'TOH', role: 'boss' };
   return { ok: false, user: null };
 }
+
+function loginPageHTML(error) {
+  return '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Login - TOH Operations OS</title>' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
+    '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">' +
+    '<style>body{margin:0;font-family:Inter,sans-serif;background:#0f1115;color:#e8eaed;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;}' +
+    '.box{background:#171a21;border:1px solid #262b35;border-radius:14px;padding:32px;width:100%;max-width:340px;}' +
+    'h1{font-size:18px;margin:0 0 4px;}p.sub{color:#9aa1ac;font-size:13px;margin:0 0 20px;}' +
+    'input{width:100%;box-sizing:border-box;padding:11px 12px;margin-bottom:12px;border-radius:8px;border:1px solid #262b35;background:#0f1115;color:#e8eaed;font-family:inherit;font-size:14px;}' +
+    'button{width:100%;padding:11px;border:none;border-radius:8px;background:#4f83ff;color:#fff;font-weight:600;font-size:14px;cursor:pointer;}' +
+    '.err{background:#3a1414;color:#f87171;font-size:12px;padding:8px 10px;border-radius:8px;margin-bottom:12px;}</style></head><body>' +
+    '<div class="box"><h1>TOH Operations OS</h1><p class="sub">Sign in to continue</p>' +
+    (error ? '<div class="err">' + error + '</div>' : '') +
+    '<form method="POST" action="/login"><input name="username" placeholder="Username" autocomplete="username" required>' +
+    '<input name="password" type="password" placeholder="Password" autocomplete="current-password" required>' +
+    '<button type="submit">Sign In</button></form></div></body></html>';
+}
+
+app.get('/login', (req, res) => {
+  res.send(loginPageHTML(null));
+});
+
+app.post('/login', async (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) return res.send(loginPageHTML('Enter username and password'));
+  const user = db.getUserByUsername(username.trim());
+  if (!user) return res.send(loginPageHTML('Invalid username or password'));
+  const match = await bcrypt.compare(password, user.password_hash);
+  if (!match) return res.send(loginPageHTML('Invalid username or password'));
+  req.session.user = { id: user.id, username: user.username, role: user.role, staffId: user.staff_id };
+  db.updateUserLastLogin(user.id);
+  res.redirect('/overview');
+});
+
+app.post('/logout', (req, res) => {
+  req.session.destroy(() => res.redirect('/login'));
+});
+
+app.get('/setup', async (req, res) => {
+  const users = db.getAllUsers();
+  if (users.length > 0) return res.status(403).send('Setup already completed. Go to <a href="/login">/login</a>.');
+  res.send('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>First-time Setup</title>' +
+    '<style>body{font-family:sans-serif;max-width:340px;margin:60px auto;padding:0 20px;}input{width:100%;box-sizing:border-box;padding:10px;margin-bottom:10px;}button{width:100%;padding:10px;background:#2563eb;color:#fff;border:none;border-radius:6px;}</style></head><body>' +
+    '<h2>Create your admin account</h2><form method="POST" action="/setup">' +
+    '<input name="username" placeholder="Username" required>' +
+    '<input name="password" type="password" placeholder="Password" required>' +
+    '<button type="submit">Create Admin Account</button></form></body></html>');
+});
+
+app.post('/setup', async (req, res) => {
+  const users = db.getAllUsers();
+  if (users.length > 0) return res.status(403).send('Setup already completed.');
+  const { username, password } = req.body || {};
+  if (!username || !password) return res.status(400).send('Username and password required');
+  const hash = await bcrypt.hash(password, 10);
+  db.createUser({ username: username.trim(), passwordHash: hash, role: 'admin', staffId: null });
+  res.send('Admin account created. <a href="/login">Go to login</a>.');
+});
 
 const conversations = {};
 const processedMessages = new Set();
@@ -947,7 +1017,7 @@ function dashboardShell(token, title, bodyAttrs, bodyHTML) {
 
 app.get('/overview', (req, res) => {
   const auth = checkDashboardAuth(req);
-  if (!auth.ok) return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  if (!auth.ok) return res.redirect('/login');
   const token = req.query.token || '';
   res.send(dashboardShell(token, 'Overview', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Overview</h2></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6"><div class="grid grid-cols-2 md:grid-cols-4 gap-4" id="stats"></div><div class="grid grid-cols-1 lg:grid-cols-2 gap-6"><div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6"><h3 class="font-headline-md text-headline-md mb-4">Active Rentals</h3><div id="activeRentals" class="text-on-surface-variant text-sm space-y-3"></div></div><div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6"><h3 class="font-headline-md text-headline-md mb-4">Fleet Status</h3><div id="fleetStatus" class="space-y-3"></div></div></div><div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6"><h3 class="font-headline-md text-headline-md mb-4">Pending AI Reviews</h3><div id="pendingTasks" class="text-on-surface-variant text-sm space-y-2"></div></div></div></main><script>const TOKEN=' + JSON.stringify(token) + ';async function load(){try{const [dRes,tRes,bRes]=await Promise.all([fetch("/api/toh/dashboard"+(TOKEN?"?token="+encodeURIComponent(TOKEN):"")),fetch("/api/toh/tasks"+(TOKEN?"?token="+encodeURIComponent(TOKEN):"")),fetch("/api/toh/motorbikes"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""))]);const d=await dRes.json(),tasks=await tRes.json(),mb=await bRes.json();if(d.error){document.getElementById("stats").innerHTML="<span class=\\"text-error\\">"+d.error+"</span>";return;}const f=d.fleet||{};const bikes=mb.bikes||[];document.getElementById("stats").innerHTML=[{label:"Active Rentals",value:d.activeRentals||0,icon:"receipt_long",color:"#3b82f6"},{label:"Available Now",value:f.available||0,icon:"check_circle",color:"#10b981"},{label:"Currently Rented",value:f.rented||0,icon:"directions_bike",color:"#6366f1"},{label:"Today Income",value:(d.finance?d.finance.income.toLocaleString():"0")+" THB",icon:"payments",color:"#f59e0b"}].map(function(s){return "<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-col gap-1\\"><div class=\\"flex items-center gap-2\\"><span class=\\"material-symbols-outlined text-sm\\" style=\\"color:"+s.color+"\\">"+s.icon+"</span><span class=\\"text-xs text-on-surface-variant\\">"+s.label+"</span></div><div class=\\"text-2xl font-bold font-label-caps tracking-tight\\">"+s.value+"</div></div>";}).join("");const rentedBikes=bikes.filter(function(b){return b.status==="Rented";});document.getElementById("activeRentals").innerHTML=rentedBikes.length?rentedBikes.map(function(b){return "<div class=\\"flex justify-between items-center py-2 border-b border-outline-variant last:border-0\\"><div><span class=\\"font-semibold font-label-caps\\">"+b.bikeId+"</span> <span class=\\"text-xs\\">"+b.model+"</span></div><span class=\\"pill-rented text-xs px-2 py-1 rounded-full font-status-badge\\">Rented</span></div>";}).join(""):"<div class=\\"text-sm\\">No active rentals</div>";const pct=f.total?Math.round(f.available/f.total*100):0;document.getElementById("fleetStatus").innerHTML="<div class=\\"flex items-center gap-3 mb-3\\"><div class=\\"flex-1 bg-outline-variant rounded-full h-3\\"><div class=\\"bg-emerald-500 h-3 rounded-full transition-all\\" style=\\"width:"+pct+"%\\"></div></div><span class=\\"text-sm font-label-caps\\">"+(f.available||0)+"/"+(f.total||0)+"</span></div><div class=\\"grid grid-cols-3 gap-3 text-center\\"><div class=\\"bg-emerald-50 rounded-lg p-3\\"><div class=\\"text-lg font-bold text-emerald-700 font-label-caps\\">"+(f.available||0)+"</div><div class=\\"text-xs text-emerald-600\\">Available</div></div><div class=\\"bg-blue-50 rounded-lg p-3\\"><div class=\\"text-lg font-bold text-blue-700 font-label-caps\\">"+(f.rented||0)+"</div><div class=\\"text-xs text-blue-600\\">Rented</div></div><div class=\\"bg-amber-50 rounded-lg p-3\\"><div class=\\"text-lg font-bold text-amber-700 font-label-caps\\">"+(f.other||0)+"</div><div class=\\"text-xs text-amber-600\\">Other</div></div></div>";const openTasks=(tasks.tasks||[]).filter(function(t){return t.status==="Open";});document.getElementById("pendingTasks").innerHTML=openTasks.length?openTasks.slice(0,5).map(function(t){return "<div class=\\"flex justify-between items-center py-2 border-b border-outline-variant last:border-0\\"><div><span class=\\"text-xs px-2 py-0.5 rounded-full font-status-badge "+(t.type.indexOf(\"Contract\")>=0?\"pill-maintenance\":\"pill-open\")+"\\">"+t.type+"</span></div><div class=\\"text-xs truncate max-w-[250px]\\">"+(t.description||"").split("\\n")[0].substring(0,80)+"</div><div class=\\"text-xs text-on-surface-variant\\">"+(t.date||"")+"</div></div>";}).join(""):"<div class=\\"text-sm\\">No pending tasks</div>";}catch(err){document.getElementById("stats").innerHTML="<span class=\\"text-error\\">Failed to load</span>";}}load();setInterval(load,30000);</script>'));
 });
@@ -959,42 +1029,42 @@ app.get('/dashboard', (req, res) => {
 
 app.get('/motorbikes', (req, res) => {
   const auth = checkDashboardAuth(req);
-  if (!auth.ok) return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  if (!auth.ok) return res.redirect('/login');
   const token = req.query.token || '';
   res.send(dashboardShell(token, 'Motorbikes Inventory', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Motorbikes</h2><div class="flex items-center gap-3"><select id="statusFilter" class="text-sm border border-outline-variant rounded-lg px-3 py-1.5 bg-surface" onchange="render()"><option value="all">All Statuses</option><option value="Available">Available</option><option value="Rented">Rented</option><option value="Maintenance">Maintenance</option><option value="Reserved">Reserved</option></select></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-4"><div class="flex justify-between items-center"><div id="bikeCount" class="text-sm text-on-surface-variant"></div></div><div id="grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div></div></main><script>var TOKEN=' + JSON.stringify(token) + ';var allBikes=[];var pill={Available:"pill-available",Rented:"pill-rented",Maintenance:"pill-maintenance",Reserved:"pill-reserved"};async function load(){try{var res=await fetch("/api/toh/motorbikes"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var data=await res.json();if(data.error){document.getElementById("grid").innerHTML="<div class=\\"col-span-full text-error\\">"+data.error+"</div>";return;}allBikes=data.bikes||[];render();}catch(err){document.getElementById("grid").innerHTML="<div class=\\"col-span-full text-error\\">Failed to load</div>";}}function render(){var f=document.getElementById("statusFilter").value;var bikes=f==="all"?allBikes:allBikes.filter(function(b){return b.status===f;});document.getElementById("bikeCount").textContent=bikes.length+" bike"+(bikes.length!==1?"s":"");document.getElementById("grid").innerHTML=bikes.map(function(b){var p=pill[b.status]||"pill-done";return "<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4 hover:shadow-sm transition-shadow\\"><div class=\\"flex justify-between items-start mb-2\\"><div><div class=\\"font-label-caps text-lg text-primary\\">"+b.bikeId+"</div><div class=\\"text-sm font-semibold mt-0.5\\">"+b.model+"</div></div><span class=\\"text-xs px-2 py-1 rounded-full font-status-badge "+p+"\\">"+b.status+"</span></div><div class=\\"text-xs text-on-surface-variant space-y-1\\"><div class=\\"flex gap-4\\"><span>Location: "+(b.location||"Chaweng")+"</span>"+(b.color?"<span>Color: "+b.color+"</span>":"")+"</div>"+(b.notes?"<div class=\\"text-on-surface-variant italic opacity-60\\">"+b.notes+"</div>":"")+"</div></div>";}).join("");}load();setInterval(load,60000);</script>'));
 });
 
 app.get('/rentals', (req, res) => {
   const auth = checkDashboardAuth(req);
-  if (!auth.ok) return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  if (!auth.ok) return res.redirect('/login');
   const token = req.query.token || '';
   res.send(dashboardShell(token, 'Rentals', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Rentals</h2><div class="flex items-center gap-3"><select id="statusFilter" class="text-sm border border-outline-variant rounded-lg px-3 py-1.5 bg-surface" onchange="renderRentals()"><option value="all">All</option><option value="active" selected>Active</option><option value="done">Completed</option></select></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-3"><div id="rentalList" class="space-y-3"></div></div></main><script>var TOKEN=' + JSON.stringify(token) + ';var allRentals=[];async function loadRentals(){try{var bRes=await fetch("/api/toh/motorbikes"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var bikes=(await bRes.json()).bikes||[];allRentals=bikes.filter(function(b){return b.status==="Rented";}).map(function(b){return {plate:b.bikeId,model:b.model,renter:b.renterName||"-",status:"active",start:b.rentedDate,end:b.expectedReturn};});try{var hRes=await fetch("/api/toh/rental-history"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var history=(await hRes.json()).history||[];history.forEach(function(h){allRentals.push({plate:h.bike_id,model:h.model||"-",renter:h.renter_name||"-",status:"done",start:h.start_date,end:h.end_date,days:h.days,price:h.price});});}catch(e){}renderRentals();}catch(err){document.getElementById("rentalList").innerHTML="<div class=\\"text-error\\">Failed to load</div>";}}function renderRentals(){var f=document.getElementById("statusFilter").value;var items=f==="all"?allRentals:allRentals.filter(function(r){return r.status===f;});document.getElementById("rentalList").innerHTML=items.length?items.map(function(r){return "<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex items-center gap-4\\"><div class=\\"font-label-caps text-primary font-bold min-w-[60px]\\">"+r.plate+"</div><div class=\\"flex-1\\"><div class=\\"font-semibold text-sm\\">"+r.renter+"</div><div class=\\"text-xs text-on-surface-variant\\">"+r.model+(r.start?" · "+r.start+" -> "+r.end:"")+(r.days?" · "+r.days+"d":"")+"</div></div><div class=\\"text-right\\"><span class=\\"text-xs px-2 py-1 rounded-full font-status-badge "+(r.status==="active"?"pill-active":"pill-done")+"\\">"+(r.status==="active"?"Active":"Done")+"</span>"+(r.price?"<div class=\\"text-sm font-semibold mt-1 font-label-caps\\">"+r.price+" THB</div>":"")+"</div></div>";}).join(""):"<div class=\\"text-on-surface-variant text-sm text-center py-8\\">No rentals found</div>";}loadRentals();setInterval(loadRentals,60000);</script>'));
 });
 
 app.get('/ai-tasks', (req, res) => {
   const auth = checkDashboardAuth(req);
-  if (!auth.ok) return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  if (!auth.ok) return res.redirect('/login');
   const token = req.query.token || '';
   res.send(dashboardShell(token, 'AI Task Queue', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">AI Task Queue</h2><div id="taskCount" class="text-sm text-on-surface-variant"></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-3"><div id="taskList" class="space-y-3"></div></div></main><script>var TOKEN=' + JSON.stringify(token) + ';async function loadTasks(){try{var res=await fetch("/api/toh/tasks"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var data=await res.json();if(data.error){document.getElementById("taskList").innerHTML="<div class=\\"text-error\\">"+data.error+"</div>";return;}var tasks=data.tasks||[];var open=tasks.filter(function(t){return t.status==="Open";});document.getElementById("taskCount").textContent=open.length+" open · "+tasks.length+" total";document.getElementById("taskList").innerHTML=tasks.length?tasks.map(function(t){var isOpen=t.status==="Open";var descLines=(t.description||"-").split("\\n");return "<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4"+(!isOpen?" opacity-60":"")+"\\"><div class=\\"flex justify-between items-start mb-2\\"><div class=\\"flex items-center gap-2\\"><span class=\\"text-xs px-2 py-1 rounded-full font-status-badge "+(t.type.indexOf(\"Contract\")>=0?\"pill-maintenance\":\"pill-open\")+"\\">"+t.type+"</span><span class=\\"text-xs text-on-surface-variant\\">"+(t.date||"")+"</span></div><span class=\\"text-xs px-2 py-1 rounded-full font-status-badge "+(isOpen?\"pill-open\":\"pill-resolved\")+"\\">"+t.status+"</span></div><div class=\\"text-sm mb-2\\">"+descLines.map(function(l){return "<div>"+l+"</div>";}).join("")+"</div><div class=\\"text-xs text-on-surface-variant mb-3\\">Contact: "+(t.contact||"-")+"</div>"+(isOpen?"<div class=\\"flex gap-2\\"><button class=\\"text-xs px-4 py-2 bg-primary text-on-primary rounded-lg font-status-badge hover:opacity-90\\" onclick=\\"resolveTaskRow("+t.id+")\\">Mark Resolved</button></div>":"<div class=\\"text-xs text-on-surface-variant\\">Resolved: "+(t.resolvedAt||"-")+"</div>")+"</div>";}).join(""):"<div class=\\"text-on-surface-variant text-sm text-center py-12\\">No tasks yet</div>";}catch(err){document.getElementById("taskList").innerHTML="<div class=\\"text-error\\">Failed to load</div>";}}async function resolveTaskRow(id){try{await fetch("/api/toh/tasks/"+id+"/resolve"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""),{method:"POST"});loadTasks();}catch(e){}}loadTasks();setInterval(loadTasks,30000);</script>'));
 });
 
 app.get('/data-quality', (req, res) => {
   const auth = checkDashboardAuth(req);
-  if (!auth.ok) return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  if (!auth.ok) return res.redirect('/login');
   const token = req.query.token || '';
   res.send(dashboardShell(token, 'Data Quality Report', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Data Quality</h2></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6"><div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6"><h3 class="font-headline-md text-headline-md mb-4">Booking Issues</h3><div id="summary" class="text-sm text-on-surface-variant mb-4"></div><div id="bookingIssues" class="space-y-3"></div></div><div class="bg-surface-container-lowest border border-outline-variant rounded-xl p-6"><h3 class="font-headline-md text-headline-md mb-4">Fleet Issues</h3><div id="fleetIssues" class="space-y-3"></div></div></div></main><script>var TOKEN=' + JSON.stringify(token) + ';async function loadDQ(){try{var dqRes=await fetch("/api/toh/data-quality"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var mbRes=await fetch("/api/toh/motorbikes"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var dq=await dqRes.json(),mb=await mbRes.json();var issues=dq.issues||[];document.getElementById("summary").textContent=issues.length?issues.length+" of "+(dq.totalRows||0)+" booking rows flagged":"All booking rows look clean";document.getElementById("bookingIssues").innerHTML=issues.length?issues.map(function(r){return "<div class=\\"border border-outline-variant rounded-lg p-3\\"><div class=\\"flex justify-between items-start\\"><span class=\\"font-semibold text-sm\\">Row "+r.row+" — "+(r.name||"Unknown")+" · "+(r.bike||"-")+"</span><span class=\\"text-xs text-on-surface-variant\\">"+(r.date||"")+"</span></div><div class=\\"flex flex-wrap gap-1 mt-2\\">"+r.problems.map(function(p){return "<span class=\\"text-xs px-2 py-1 rounded-full pill-maintenance\\">"+p+"</span>";}).join("")+"</div></div>";}).join(""):"<div class=\\"text-sm text-on-surface-variant\\">No booking issues found</div>";var bikes=mb.bikes||[];var fleetProbs=bikes.filter(function(b){return !b.model||!b.location||(b.status==="Maintenance"&&!b.notes);});document.getElementById("fleetIssues").innerHTML=fleetProbs.length?fleetProbs.map(function(b){var probs=[];if(!b.model)probs.push("Missing model");if(!b.location)probs.push("Missing location");if(b.status==="Maintenance"&&!b.notes)probs.push("Maintenance without reason");return "<div class=\\"border border-outline-variant rounded-lg p-3\\"><div class=\\"flex justify-between items-start\\"><span class=\\"font-label-caps text-primary font-bold\\">"+b.bikeId+"</span><span class=\\"text-xs px-2 py-1 rounded-full font-status-badge pill-maintenance\\">"+b.status+"</span></div><div class=\\"flex flex-wrap gap-1 mt-2\\">"+probs.map(function(p){return "<span class=\\"text-xs px-2 py-1 rounded-full pill-open\\">"+p+"</span>";}).join("")+"</div></div>";}).join(""):"<div class=\\"text-sm text-on-surface-variant\\">All fleet records look complete</div>";}catch(err){document.getElementById("summary").textContent="Failed to load data";}}loadDQ();</script>'));
 });
 
 app.get('/rental-history', (req, res) => {
   const auth = checkDashboardAuth(req);
-  if (!auth.ok) return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  if (!auth.ok) return res.redirect('/login');
   const token = req.query.token || '';
   res.send(dashboardShell(token, 'Rental History', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Rental History</h2><div class="flex items-center gap-3"><input id="searchInput" class="text-sm border border-outline-variant rounded-lg px-3 py-1.5 bg-surface w-[200px]" placeholder="Search plate or name..." oninput="renderHistory()"></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-3"><div id="count" class="text-sm text-on-surface-variant"></div><div id="historyList" class="space-y-3"></div></div></main><script>var TOKEN=' + JSON.stringify(token) + ';var allHistory=[];async function loadHistory(){try{var res=await fetch("/api/toh/rental-history"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var data=await res.json();if(data.error){document.getElementById("historyList").innerHTML="<div class=\\"text-error\\">"+data.error+"</div>";return;}allHistory=data.history||[];renderHistory();}catch(err){document.getElementById("historyList").innerHTML="<div class=\\"text-error\\">Failed to load</div>";}}function renderHistory(){var q=(document.getElementById("searchInput").value||"").toLowerCase();var items=q?allHistory.filter(function(h){return (h.bike_id||"").toLowerCase().indexOf(q)>=0||(h.renter_name||"").toLowerCase().indexOf(q)>=0;}):allHistory;document.getElementById("count").textContent=items.length+" rental"+(items.length!==1?"s":"")+" logged";document.getElementById("historyList").innerHTML=items.length?items.map(function(h){return "<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-wrap items-center gap-3\\"><div class=\\"font-label-caps text-primary font-bold min-w-[50px]\\">"+(h.bike_id||"-")+"</div><div class=\\"flex-1 min-w-0\\"><div class=\\"font-semibold text-sm\\">"+(h.renter_name||"-")+"</div><div class=\\"text-xs text-on-surface-variant\\">"+(h.start_date||"")+" -> "+(h.end_date||"")+(h.days?" · "+h.days+" days":"")+"</div></div><div class=\\"flex items-center gap-3 ml-auto\\"><div class=\\"text-sm font-semibold font-label-caps\\">"+(h.price?h.price+" THB":"-")+"</div><div class=\\"text-xs text-on-surface-variant\\">"+(h.date_logged||"")+"</div></div></div>";}).join(""):"<div class=\\"text-on-surface-variant text-sm text-center py-12\\">No rental history yet</div>";}loadHistory();setInterval(loadHistory,120000);</script>'));
 });
 
 app.get('/staff', (req, res) => {
   const auth = checkDashboardAuth(req);
-  if (!auth.ok) return res.status(401).send('Unauthorized. Add ?token=YOUR_TOKEN to the URL.');
+  if (!auth.ok) return res.redirect('/login');
   const token = req.query.token || '';
   res.send(dashboardShell(token, 'Staff', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Staff</h2><div class="flex items-center gap-3"><span id="countBadge" class="text-sm text-on-surface-variant"></span><button id="adminToggle" class="text-xs px-3 py-2 rounded-lg font-status-badge bg-surface-container-high hover:opacity-80" onclick="toggleAdmin()">Admin mode: Off</button><button id="addBtn" class="text-xs px-3 py-2 rounded-lg font-status-badge bg-primary text-on-primary hover:opacity-90" style="display:none" onclick="openAddModal()">+ Add Staff</button></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6"><div><h3 class="font-headline-md text-headline-md mb-3">Boss</h3><div id="bossGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div></div><div><h3 class="font-headline-md text-headline-md mb-3">Staff</h3><div id="staffGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div></div></div></main>' +
   '<div id="addModal" class="fixed inset-0 bg-black/40 items-center justify-center z-50" style="display:none"><div class="bg-surface-container-lowest rounded-xl p-6 w-[300px]"><h3 class="font-headline-md text-headline-md mb-4">Add Staff</h3><input id="newName" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface" placeholder="Name"><input id="newPhone" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface" placeholder="Phone (with country code)"><select id="newRole" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface"><option value="staff">Staff</option><option value="boss">Boss</option></select><div class="flex gap-2 mb-3"><input id="newShiftStart" type="time" value="08:00" class="flex-1 border border-outline-variant rounded-lg px-2 py-2 text-sm bg-surface"><input id="newShiftEnd" type="time" value="18:00" class="flex-1 border border-outline-variant rounded-lg px-2 py-2 text-sm bg-surface"></div><div class="flex gap-2 justify-end"><button class="text-xs px-3 py-2 rounded-lg bg-surface-container-high" onclick="closeAddModal()">Cancel</button><button class="text-xs px-3 py-2 rounded-lg bg-primary text-on-primary" onclick="confirmAdd()">Add</button></div></div></div>' +
