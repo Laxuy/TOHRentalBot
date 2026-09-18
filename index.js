@@ -40,6 +40,10 @@ function checkDashboardAuth(req) {
   return { ok: false, user: null };
 }
 
+function isBossRole(auth) {
+  return auth.role === 'boss' || auth.role === 'admin';
+}
+
 function loginPageHTML(error) {
   return '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Login - TOH Operations OS</title>' +
     '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
@@ -70,7 +74,8 @@ app.post('/login', async (req, res) => {
   if (!match) return res.send(loginPageHTML('Invalid username or password'));
   req.session.user = { id: user.id, username: user.username, role: user.role, staffId: user.staff_id };
   db.updateUserLastLogin(user.id);
-  res.redirect('/overview');
+  const dest = (user.role === 'boss' || user.role === 'admin') ? '/overview' : '/staff';
+  res.redirect(dest);
 });
 
 app.post('/logout', (req, res) => {
@@ -896,6 +901,7 @@ app.get('/api/:shopId/staff', async (req, res) => {
 app.post('/api/:shopId/staff', async (req, res) => {
   const auth = checkDashboardAuth(req);
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
+  if (!isBossRole(auth)) return res.status(403).json({ error: 'Boss access only' });
   try {
     getShop(req.params.shopId);
     const { name, phone, role, shiftStart, shiftEnd } = req.body || {};
@@ -910,6 +916,7 @@ app.post('/api/:shopId/staff', async (req, res) => {
 app.delete('/api/:shopId/staff/:staffId', async (req, res) => {
   const auth = checkDashboardAuth(req);
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
+  if (!isBossRole(auth)) return res.status(403).json({ error: 'Boss access only' });
   try {
     getShop(req.params.shopId);
     const result = db.removeStaff(req.params.staffId);
@@ -958,6 +965,7 @@ app.post('/api/:shopId/staff/:staffId/leave', async (req, res) => {
 app.post('/api/:shopId/staff/:staffId/shift', async (req, res) => {
   const auth = checkDashboardAuth(req);
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
+  if (!isBossRole(auth)) return res.status(403).json({ error: 'Boss access only' });
   try {
     getShop(req.params.shopId);
     const { shiftStart, shiftEnd } = req.body || {};
@@ -975,6 +983,7 @@ app.post('/api/:shopId/staff/:staffId/shift', async (req, res) => {
 app.post('/api/:shopId/staff/:staffId/hours', async (req, res) => {
   const auth = checkDashboardAuth(req);
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
+  if (!isBossRole(auth)) return res.status(403).json({ error: 'Boss access only' });
   try {
     getShop(req.params.shopId);
     const { todayHours, weekHours } = req.body || {};
@@ -988,6 +997,7 @@ app.post('/api/:shopId/staff/:staffId/hours', async (req, res) => {
 app.post('/api/:shopId/staff/:staffId/create-login', async (req, res) => {
   const auth = checkDashboardAuth(req);
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
+  if (!isBossRole(auth)) return res.status(403).json({ error: 'Boss access only' });
   try {
     getShop(req.params.shopId);
     const { username, password } = req.body || {};
@@ -1090,7 +1100,11 @@ app.get('/staff', (req, res) => {
   const auth = checkDashboardAuth(req);
   if (!auth.ok) return res.redirect('/login');
   const token = req.query.token || '';
-  res.send(dashboardShell(token, 'Staff', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Staff</h2><div class="flex items-center gap-3"><span id="countBadge" class="text-sm text-on-surface-variant"></span><button id="adminToggle" class="text-xs px-3 py-2 rounded-lg font-status-badge bg-surface-container-high hover:opacity-80" onclick="toggleAdmin()">Admin mode: Off</button><button id="addBtn" class="text-xs px-3 py-2 rounded-lg font-status-badge bg-primary text-on-primary hover:opacity-90" style="display:none" onclick="openAddModal()">+ Add Staff</button></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6"><div><h3 class="font-headline-md text-headline-md mb-3">Boss</h3><div id="bossGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div></div><div><h3 class="font-headline-md text-headline-md mb-3">Staff</h3><div id="staffGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div></div></div></main>' +
+  const isBoss = isBossRole(auth);
+  const adminControlsHTML = isBoss
+    ? '<button id="adminToggle" class="text-xs px-3 py-2 rounded-lg font-status-badge bg-surface-container-high hover:opacity-80" onclick="toggleAdmin()">Admin mode: Off</button><button id="addBtn" class="text-xs px-3 py-2 rounded-lg font-status-badge bg-primary text-on-primary hover:opacity-90" style="display:none" onclick="openAddModal()">+ Add Staff</button>'
+    : '';
+  res.send(dashboardShell(token, 'Staff', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Staff</h2><div class="flex items-center gap-3"><span id="countBadge" class="text-sm text-on-surface-variant"></span>' + adminControlsHTML + '</div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-6"><div><h3 class="font-headline-md text-headline-md mb-3">Boss</h3><div id="bossGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div></div><div><h3 class="font-headline-md text-headline-md mb-3">Staff</h3><div id="staffGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div></div></div></main>' +
   '<div id="addModal" class="fixed inset-0 bg-black/40 items-center justify-center z-50" style="display:none"><div class="bg-surface-container-lowest rounded-xl p-6 w-[300px]"><h3 class="font-headline-md text-headline-md mb-4">Add Staff</h3><input id="newName" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface" placeholder="Name"><input id="newPhone" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface" placeholder="Phone (with country code)"><select id="newRole" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface"><option value="staff">Staff</option><option value="boss">Boss</option></select><div class="flex gap-2 mb-3"><input id="newShiftStart" type="time" value="08:00" class="flex-1 border border-outline-variant rounded-lg px-2 py-2 text-sm bg-surface"><input id="newShiftEnd" type="time" value="18:00" class="flex-1 border border-outline-variant rounded-lg px-2 py-2 text-sm bg-surface"></div><div class="flex gap-2 justify-end"><button class="text-xs px-3 py-2 rounded-lg bg-surface-container-high" onclick="closeAddModal()">Cancel</button><button class="text-xs px-3 py-2 rounded-lg bg-primary text-on-primary" onclick="confirmAdd()">Add</button></div></div></div>' +
   '<div id="editModal" class="fixed inset-0 bg-black/40 items-center justify-center z-50" style="display:none"><div class="bg-surface-container-lowest rounded-xl p-6 w-[300px]"><h3 id="editTitle" class="font-headline-md text-headline-md mb-4">Edit</h3><label class="text-xs text-on-surface-variant">Shift start</label><input id="editStart" type="time" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface"><label class="text-xs text-on-surface-variant">Shift end</label><input id="editEnd" type="time" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface"><label class="text-xs text-on-surface-variant">Today hours</label><input id="editToday" type="number" step="0.1" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface"><label class="text-xs text-on-surface-variant">Week hours</label><input id="editWeek" type="number" step="0.1" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-3 text-sm bg-surface"><div class="flex gap-2 justify-end"><button class="text-xs px-3 py-2 rounded-lg bg-surface-container-high" onclick="closeEditModal()">Cancel</button><button class="text-xs px-3 py-2 rounded-lg bg-primary text-on-primary" onclick="confirmEdit()">Save</button></div></div></div>' +
   '<div id="loginModal" class="fixed inset-0 bg-black/40 items-center justify-center z-50" style="display:none"><div class="bg-surface-container-lowest rounded-xl p-6 w-[300px]"><h3 id="loginModalTitle" class="font-headline-md text-headline-md mb-4">Create Login</h3><input id="loginUsername" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface" placeholder="Username"><input id="loginPassword" type="password" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface" placeholder="Password"><div id="loginModalMsg" class="text-xs text-error mb-2"></div><div class="flex gap-2 justify-end"><button class="text-xs px-3 py-2 rounded-lg bg-surface-container-high" onclick="closeLoginModal()">Cancel</button><button class="text-xs px-3 py-2 rounded-lg bg-primary text-on-primary" onclick="confirmCreateLogin()">Create</button></div></div></div>' +
