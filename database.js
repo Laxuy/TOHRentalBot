@@ -154,7 +154,21 @@ function getAllMotorbikes() {
 
 function getMotorbikeByPlate(plate) {
   const db = getDb();
-  return db.prepare('SELECT * FROM motorbikes WHERE plate = ?').get(plate);
+  const exact = db.prepare('SELECT * FROM motorbikes WHERE plate = ?').get(plate);
+  if (exact) return exact;
+  // Fallback: staff often type just the trailing number/code (e.g. "3990"
+  // instead of "Honda Click 150 3990"). Match plates ending with that code.
+  const query = String(plate).trim();
+  if (!query) return null;
+  const matches = db.prepare('SELECT * FROM motorbikes WHERE plate LIKE ?').all('%' + query);
+  if (matches.length === 1) return matches[0];
+  return null; // ambiguous (0 or 2+ matches) — treat as not found
+}
+
+function findMotorbikesByCode(plate) {
+  const db = getDb();
+  const query = String(plate).trim();
+  return db.prepare('SELECT * FROM motorbikes WHERE plate LIKE ?').all('%' + query);
 }
 
 function upsertMotorbike(bike) {
@@ -527,6 +541,7 @@ module.exports = {
   // motorbikes
   getAllMotorbikes,
   getMotorbikeByPlate,
+  findMotorbikesByCode,
   upsertMotorbike,
   updateBikeStatus,
   getFleetAvailability,
