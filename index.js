@@ -154,10 +154,10 @@ function parseCleanPrice(str) {
   return isNaN(num) ? null : num;
 }
 
-async function logFinance(type, bike, amount, description, reportedBy) {
+async function logFinance(type, bike, amount, description, reportedBy, status) {
   try {
-    db.logFinance(type, bike, amount, description, reportedBy);
-    console.log(`${type} logged to database`);
+    db.logFinance(type, bike, amount, description, reportedBy, status);
+    console.log(`${type} logged to database${status === 'Pending' ? ' (pending)' : ''}`);
   } catch (err) {
     console.error('Finance log error:', err.message);
   }
@@ -315,6 +315,14 @@ async function setBikeStatus(plateQuery, status, options = {}) {
       logged_by: options.loggedBy || '',
     });
     if (!result.ok) return result;
+    if (options.paymentStatus === 'paid' && parseFloat(options.price) > 0) {
+      await logFinance('Income', bike.plate, parseFloat(options.price), `Rental - ${options.renterName || result.customer || 'customer'}`, options.loggedBy || 'Staff', 'Confirmed');
+      return { ok: true, message: `${bike.plate} marked as Rented. Payment of ${options.price} THB recorded.` };
+    }
+    if (options.paymentStatus === 'npy') {
+      await logFinance('Income', bike.plate, parseFloat(options.price) || 0, `Rental - ${options.renterName || result.customer || 'customer'} (not paid yet)`, options.loggedBy || 'Staff', 'Pending');
+      return { ok: true, message: `${bike.plate} marked as Rented. Payment marked as NOT paid yet — use "paid ${bike.plate} <amount>" once collected.` };
+    }
     return { ok: true, message: `${bike.plate} marked as Rented.` };
   }
 
@@ -535,10 +543,41 @@ app.post('/webhook', async (req, res) => {
             await sendWhatsApp(from, `*Fleet Availability:*\n\n${formatFleetSummary(byType)}`);
             return res.sendStatus(200);
           }
-          const rentMatch = text.match(/^rent\s+(.+)$/i);
+          const rentMatch = text.match(/^rent\s+(\S+)(?:\s+(NPY|npy|\d+(?:\.\d+)?))?\s*$/i);
           if (rentMatch) {
-            const result = await setBikeStatus(rentMatch[1], 'Rented');
+            const [, plate, paymentInput] = rentMatch;
+            let price = 0;
+            let paymentStatus = 'unpaid';
+            if (paymentInput && /^npy$/i.test(paymentInput)) {
+              paymentStatus = 'npy';
+            } else if (paymentInput) {
+              price = parseFloat(paymentInput) || 0;
+              paymentStatus = 'paid';
+            }
+            const result = await setBikeStatus(plate, 'Rented', {
+              price,
+              paymentStatus,
+              loggedBy: `WhatsApp Staff +${from}`,
+            });
             await sendWhatsApp(from, result.message);
+            return res.sendStatus(200);
+          }
+          const paidMatch = text.match(/^paid\s+(\S+)\s+(\d+(?:\.\d+)?)\s*$/i);
+          if (paidMatch) {
+            const [, plate, priceStr] = paidMatch;
+            const price = parseFloat(priceStr) || 0;
+            await logFinance('Income', plate, price, `Payment received (was pending)`, `WhatsApp Staff +${from}`, 'Confirmed');
+            await sendWhatsApp(from, `Payment of ${price} THB recorded for ${plate}.`);
+            return res.sendStatus(200);
+          }
+          if (/^pending\s*$/i.test(text)) {
+            const pending = db.getPendingPayments();
+            if (pending.length === 0) {
+              await sendWhatsApp(from, 'No pending payments right now.');
+            } else {
+              const lines = pending.map(p => `${p.bike} — ${p.amount} THB (${p.date})`).join('\n');
+              await sendWhatsApp(from, `Pending payments:\n${lines}`);
+            }
             return res.sendStatus(200);
           }
           const returnMatch = text.match(/^return\s+(\S+)(?:\s+(\d+(?:\.\d+)?))?\s*$/i);
@@ -720,10 +759,9 @@ Be friendly, helpful and concise. Answer in the same language the customer write
         };
       }
       await recordBooking(bookingData);
-      const totalAmount = parseThbAmount(bookingData.price);
-      if (totalAmount > 0) {
-        await logFinance('Income', bookingData.bike, totalAmount, `Booking - ${bookingData.name || 'customer'}`, 'WhatsApp Bot');
-      }
+      // Note: income is no longer logged here. This is just a reservation from
+      // the chat — real payment is only recorded when staff actually hand over
+      // the bike via the "rent" command/dashboard (with a price, or NPY).
       console.log(`Booking completed for ${from}`);
     } else if (reply.includes('NEED_HUMAN_HELP')) {
       await sendWhatsApp(from, 'No problem! Our staff will contact you shortly.');
@@ -811,12 +849,13 @@ app.post('/api/:shopId/motorbikes/:bikeId/status', async (req, res) => {
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
     getShop(req.params.shopId);
-    const { status, renterName, renterPhone, expectedReturn, price } = req.body || {};
+    const { status, renterName, renterPhone, expectedReturn, price, paymentStatus } = req.body || {};
     const result = await setBikeStatus(req.params.bikeId, status, {
       renterName,
       renterPhone,
       expectedReturn,
       price,
+      paymentStatus,
       loggedBy: auth.user,
     });
     if (!result.ok) return res.status(400).json(result);
@@ -1092,14 +1131,14 @@ app.get('/motorbikes', (req, res) => {
   if (!auth.ok) return res.redirect('/login');
   const token = req.query.token || '';
   res.send(dashboardShell(token, 'Motorbikes Inventory', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Motorbikes</h2><div class="flex items-center gap-3"><select id="statusFilter" class="text-sm border border-outline-variant rounded-lg px-3 py-1.5 bg-surface" onchange="render()"><option value="all">All Statuses</option><option value="Available">Available</option><option value="Rented">Rented</option><option value="Maintenance">Maintenance</option><option value="Reserved">Reserved</option></select></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-4"><div class="flex justify-between items-center"><div id="bikeCount" class="text-sm text-on-surface-variant"></div></div><div id="grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div></div></main>' +
-  '<div id="rentModal" class="fixed inset-0 bg-black/40 items-center justify-center z-50" style="display:none"><div class="bg-surface-container-lowest rounded-xl p-6 w-[300px]"><h3 class="font-headline-md text-headline-md mb-4">Mark Rented</h3><input id="rentName" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface" placeholder="Customer name"><input id="rentPhone" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface" placeholder="Phone (optional)"><label class="text-xs text-on-surface-variant">Expected return</label><input id="rentReturn" type="date" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface"><input id="rentPrice" type="number" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface" placeholder="Price (THB)"><div id="rentMsg" class="text-xs text-error mb-2"></div><div class="flex gap-2 justify-end"><button class="text-xs px-3 py-2 rounded-lg bg-surface-container-high" onclick="closeRentModal()">Cancel</button><button class="text-xs px-3 py-2 rounded-lg bg-primary text-on-primary" onclick="confirmRent()">Confirm</button></div></div></div>' +
+  '<div id="rentModal" class="fixed inset-0 bg-black/40 items-center justify-center z-50" style="display:none"><div class="bg-surface-container-lowest rounded-xl p-6 w-[300px]"><h3 class="font-headline-md text-headline-md mb-4">Mark Rented</h3><input id="rentName" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface" placeholder="Customer name"><input id="rentPhone" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface" placeholder="Phone (optional)"><label class="text-xs text-on-surface-variant">Expected return</label><input id="rentReturn" type="date" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface"><input id="rentPrice" type="number" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface" placeholder="Price (THB)"><label class="flex items-center gap-2 text-xs mb-2"><input type="checkbox" id="rentNPY" onchange="document.getElementById(\'rentPrice\').disabled=this.checked;"> Not paid yet (NPY)</label><div id="rentMsg" class="text-xs text-error mb-2"></div><div class="flex gap-2 justify-end"><button class="text-xs px-3 py-2 rounded-lg bg-surface-container-high" onclick="closeRentModal()">Cancel</button><button class="text-xs px-3 py-2 rounded-lg bg-primary text-on-primary" onclick="confirmRent()">Confirm</button></div></div></div>' +
   '<div id="returnModal" class="fixed inset-0 bg-black/40 items-center justify-center z-50" style="display:none"><div class="bg-surface-container-lowest rounded-xl p-6 w-[300px]"><h3 class="font-headline-md text-headline-md mb-4">Mark Returned</h3><input id="returnPrice" type="number" class="w-full border border-outline-variant rounded-lg px-3 py-2 mb-2 text-sm bg-surface" placeholder="Final price (THB, optional)"><div id="returnMsg" class="text-xs text-error mb-2"></div><div class="flex gap-2 justify-end"><button class="text-xs px-3 py-2 rounded-lg bg-surface-container-high" onclick="closeReturnModal()">Cancel</button><button class="text-xs px-3 py-2 rounded-lg bg-primary text-on-primary" onclick="confirmReturn()">Confirm</button></div></div></div>' +
   '<script>var TOKEN=' + JSON.stringify(token) + ';var allBikes=[];var pill={Available:"pill-available",Rented:"pill-rented",Maintenance:"pill-maintenance",Reserved:"pill-reserved"};' +
   'function qs(p){return "/api/toh/"+p+(TOKEN?(p.indexOf("?")>=0?"&":"?")+"token="+encodeURIComponent(TOKEN):"");}' +
   'async function load(){try{var res=await fetch(qs("motorbikes"));var data=await res.json();if(data.error){document.getElementById("grid").innerHTML="<div class=\\"col-span-full text-error\\">"+data.error+"</div>";return;}allBikes=data.bikes||[];render();}catch(err){document.getElementById("grid").innerHTML="<div class=\\"col-span-full text-error\\">Failed to load</div>";}}' +
-  'var rentTarget=null;function openRentModal(id){rentTarget=id;document.getElementById("rentName").value="";document.getElementById("rentPhone").value="";document.getElementById("rentReturn").value="";document.getElementById("rentPrice").value="";document.getElementById("rentMsg").textContent="";document.getElementById("rentModal").style.display="flex";}' +
+  'var rentTarget=null;function openRentModal(id){rentTarget=id;document.getElementById("rentName").value="";document.getElementById("rentPhone").value="";document.getElementById("rentReturn").value="";document.getElementById("rentPrice").value="";document.getElementById("rentPrice").disabled=false;document.getElementById("rentNPY").checked=false;document.getElementById("rentMsg").textContent="";document.getElementById("rentModal").style.display="flex";}' +
   'function closeRentModal(){document.getElementById("rentModal").style.display="none";}' +
-  'async function confirmRent(){var name=document.getElementById("rentName").value.trim();if(!name){document.getElementById("rentMsg").textContent="Enter customer name";return;}var body={status:"Rented",renterName:name,renterPhone:document.getElementById("rentPhone").value.trim(),expectedReturn:document.getElementById("rentReturn").value,price:document.getElementById("rentPrice").value};var res=await fetch(qs("motorbikes/"+rentTarget+"/status"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});var data=await res.json();if(data.error||data.ok===false){document.getElementById("rentMsg").textContent=data.error||data.message||"Failed";return;}closeRentModal();load();}' +
+  'async function confirmRent(){var name=document.getElementById("rentName").value.trim();if(!name){document.getElementById("rentMsg").textContent="Enter customer name";return;}var isNPY=document.getElementById("rentNPY").checked;var priceVal=document.getElementById("rentPrice").value;var body={status:"Rented",renterName:name,renterPhone:document.getElementById("rentPhone").value.trim(),expectedReturn:document.getElementById("rentReturn").value,price:priceVal,paymentStatus:isNPY?"npy":(priceVal?"paid":"unpaid")};var res=await fetch(qs("motorbikes/"+rentTarget+"/status"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});var data=await res.json();if(data.error||data.ok===false){document.getElementById("rentMsg").textContent=data.error||data.message||"Failed";return;}closeRentModal();load();}' +
   'var returnTarget=null;function openReturnModal(id){returnTarget=id;document.getElementById("returnPrice").value="";document.getElementById("returnMsg").textContent="";document.getElementById("returnModal").style.display="flex";}' +
   'function closeReturnModal(){document.getElementById("returnModal").style.display="none";}' +
   'async function confirmReturn(){var body={status:"Available",price:document.getElementById("returnPrice").value};var res=await fetch(qs("motorbikes/"+returnTarget+"/status"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});var data=await res.json();if(data.error||data.ok===false){document.getElementById("returnMsg").textContent=data.error||data.message||"Failed";return;}closeReturnModal();load();}' +
