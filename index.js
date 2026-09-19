@@ -8,6 +8,7 @@ const { getShop } = require('./config/shops');
 const db = require('./database');
 require('dotenv').config();
 const app = express();
+app.set('trust proxy', 1);
 app.use(express.json({
   verify: (req, res, buf) => { req.rawBody = buf; },
 }));
@@ -63,6 +64,39 @@ function isBossRole(auth) {
   return auth.role === 'boss' || auth.role === 'admin';
 }
 
+// Simple in-memory rate limiter for login attempts (per IP address).
+const loginAttempts = new Map();
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
+function checkLoginRateLimit(ip) {
+  const entry = loginAttempts.get(ip);
+  if (!entry) return { blocked: false };
+  const elapsed = Date.now() - entry.firstAttempt;
+  if (elapsed > LOGIN_WINDOW_MS) {
+    loginAttempts.delete(ip);
+    return { blocked: false };
+  }
+  if (entry.count >= MAX_LOGIN_ATTEMPTS) {
+    const retryInMin = Math.ceil((LOGIN_WINDOW_MS - elapsed) / 60000);
+    return { blocked: true, retryInMin };
+  }
+  return { blocked: false };
+}
+
+function recordFailedLogin(ip) {
+  const entry = loginAttempts.get(ip);
+  if (!entry) {
+    loginAttempts.set(ip, { count: 1, firstAttempt: Date.now() });
+  } else {
+    entry.count += 1;
+  }
+}
+
+function clearLoginAttempts(ip) {
+  loginAttempts.delete(ip);
+}
+
 function loginPageHTML(error) {
   return '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Login - TOH Operations OS</title>' +
     '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
@@ -85,12 +119,24 @@ app.get('/login', (req, res) => {
 });
 
 app.post('/login', async (req, res) => {
+  const ip = req.ip;
+  const rl = checkLoginRateLimit(ip);
+  if (rl.blocked) {
+    return res.send(loginPageHTML(`Too many failed attempts. Try again in ${rl.retryInMin} minute(s).`));
+  }
   const { username, password } = req.body || {};
   if (!username || !password) return res.send(loginPageHTML('Enter username and password'));
   const user = db.getUserByUsername(username.trim());
-  if (!user) return res.send(loginPageHTML('Invalid username or password'));
+  if (!user) {
+    recordFailedLogin(ip);
+    return res.send(loginPageHTML('Invalid username or password'));
+  }
   const match = await bcrypt.compare(password, user.password_hash);
-  if (!match) return res.send(loginPageHTML('Invalid username or password'));
+  if (!match) {
+    recordFailedLogin(ip);
+    return res.send(loginPageHTML('Invalid username or password'));
+  }
+  clearLoginAttempts(ip);
   req.session.user = { id: user.id, username: user.username, role: user.role, staffId: user.staff_id };
   db.updateUserLastLogin(user.id);
   const dest = (user.role === 'boss' || user.role === 'admin') ? '/overview' : '/staff';
