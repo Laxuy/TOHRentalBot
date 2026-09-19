@@ -191,6 +191,11 @@ function parseThbAmount(str) {
   return match ? parseFloat(match[0]) : 0;
 }
 
+function resolveStaffLabel(phone) {
+  const staff = db.getStaffByPhone(phone);
+  return staff ? staff.name : `WhatsApp +${phone}`;
+}
+
 function parseCleanPrice(str) {
   if (!str) return null;
   const trimmed = String(str).trim();
@@ -439,6 +444,7 @@ async function getFleetList() {
       rentedDate: rental?.start_date || '',
       expectedReturn: rental?.end_date || '',
       returnedDate: '',
+      loggedBy: rental?.logged_by || '',
       status: b.status,
       notes: b.notes,
     };
@@ -603,7 +609,7 @@ app.post('/webhook', async (req, res) => {
             const result = await setBikeStatus(plate, 'Rented', {
               price,
               paymentStatus,
-              loggedBy: `WhatsApp Staff +${from}`,
+              loggedBy: resolveStaffLabel(from),
             });
             await sendWhatsApp(from, result.message);
             return res.sendStatus(200);
@@ -612,7 +618,7 @@ app.post('/webhook', async (req, res) => {
           if (paidMatch) {
             const [, plate, priceStr] = paidMatch;
             const price = parseFloat(priceStr) || 0;
-            await logFinance('Income', plate, price, `Payment received (was pending)`, `WhatsApp Staff +${from}`, 'Confirmed');
+            await logFinance('Income', plate, price, `Payment received (was pending)`, resolveStaffLabel(from), 'Confirmed');
             await sendWhatsApp(from, `Payment of ${price} THB recorded for ${plate}.`);
             return res.sendStatus(200);
           }
@@ -631,7 +637,7 @@ app.post('/webhook', async (req, res) => {
             const [, plate, priceStr] = returnMatch;
             const result = await setBikeStatus(plate, 'Available', {
               price: priceStr || '',
-              loggedBy: `WhatsApp Staff +${from}`,
+              loggedBy: resolveStaffLabel(from),
             });
             await sendWhatsApp(from, result.message);
             return res.sendStatus(200);
@@ -639,7 +645,7 @@ app.post('/webhook', async (req, res) => {
           const expenseMatch = text.match(/^expense\s+(\S+)\s+(\d+(?:\.\d+)?)\s*(.*)$/i);
           if (expenseMatch) {
             const [, bike, amountStr, description] = expenseMatch;
-            await logFinance('Expense', bike, parseFloat(amountStr), description || 'No description', `+${from}`);
+            await logFinance('Expense', bike, parseFloat(amountStr), description || 'No description', resolveStaffLabel(from));
             await sendWhatsApp(from, `Logged: ${amountStr} THB expense for ${bike}${description ? ' - ' + description : ''}`);
             return res.sendStatus(200);
           }
@@ -1196,7 +1202,7 @@ app.get('/rentals', (req, res) => {
   const auth = checkDashboardAuth(req);
   if (!auth.ok) return res.redirect('/login');
   const token = req.query.token || '';
-  res.send(dashboardShell(token, 'Rentals', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Rentals</h2><div class="flex items-center gap-3"><select id="statusFilter" class="text-sm border border-outline-variant rounded-lg px-3 py-1.5 bg-surface" onchange="renderRentals()"><option value="all">All</option><option value="active" selected>Active</option><option value="done">Completed</option></select></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-3"><div id="rentalList" class="space-y-3"></div></div></main><script>var TOKEN=' + JSON.stringify(token) + ';var allRentals=[];async function loadRentals(){try{var bRes=await fetch("/api/toh/motorbikes"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var bikes=(await bRes.json()).bikes||[];allRentals=bikes.filter(function(b){return b.status==="Rented";}).map(function(b){return {plate:b.bikeId,model:b.model,renter:b.renterName||"-",status:"active",start:b.rentedDate,end:b.expectedReturn};});try{var hRes=await fetch("/api/toh/rental-history"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var history=(await hRes.json()).history||[];history.forEach(function(h){allRentals.push({plate:h.bike_id,model:h.model||"-",renter:h.renter_name||"-",status:"done",start:h.start_date,end:h.end_date,days:h.days,price:h.price});});}catch(e){}renderRentals();}catch(err){document.getElementById("rentalList").innerHTML="<div class=\\"text-error\\">Failed to load</div>";}}function renderRentals(){var f=document.getElementById("statusFilter").value;var items=f==="all"?allRentals:allRentals.filter(function(r){return r.status===f;});document.getElementById("rentalList").innerHTML=items.length?items.map(function(r){return "<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex items-center gap-4\\"><div class=\\"font-label-caps text-primary font-bold min-w-[60px]\\">"+r.plate+"</div><div class=\\"flex-1\\"><div class=\\"font-semibold text-sm\\">"+r.renter+"</div><div class=\\"text-xs text-on-surface-variant\\">"+r.model+(r.start?" · "+r.start+" -> "+r.end:"")+(r.days?" · "+r.days+"d":"")+"</div></div><div class=\\"text-right\\"><span class=\\"text-xs px-2 py-1 rounded-full font-status-badge "+(r.status==="active"?"pill-active":"pill-done")+"\\">"+(r.status==="active"?"Active":"Done")+"</span>"+(r.price?"<div class=\\"text-sm font-semibold mt-1 font-label-caps\\">"+r.price+" THB</div>":"")+"</div></div>";}).join(""):"<div class=\\"text-on-surface-variant text-sm text-center py-8\\">No rentals found</div>";}loadRentals();setInterval(loadRentals,60000);</script>', isBossRole(auth)));
+  res.send(dashboardShell(token, 'Rentals', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Rentals</h2><div class="flex items-center gap-3"><select id="statusFilter" class="text-sm border border-outline-variant rounded-lg px-3 py-1.5 bg-surface" onchange="renderRentals()"><option value="all">All</option><option value="active" selected>Active</option><option value="done">Completed</option></select></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-3"><div id="rentalList" class="space-y-3"></div></div></main><script>var TOKEN=' + JSON.stringify(token) + ';var allRentals=[];async function loadRentals(){try{var bRes=await fetch("/api/toh/motorbikes"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var bikes=(await bRes.json()).bikes||[];allRentals=bikes.filter(function(b){return b.status==="Rented";}).map(function(b){return {plate:b.bikeId,model:b.model,renter:b.renterName||"-",status:"active",start:b.rentedDate,end:b.expectedReturn,loggedBy:b.loggedBy||""};});try{var hRes=await fetch("/api/toh/rental-history"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var history=(await hRes.json()).history||[];history.forEach(function(h){allRentals.push({plate:h.bike_id,model:h.model||"-",renter:h.renter_name||"-",status:"done",start:h.start_date,end:h.end_date,days:h.days,price:h.price,loggedBy:h.logged_by||""});});}catch(e){}renderRentals();}catch(err){document.getElementById("rentalList").innerHTML="<div class=\\"text-error\\">Failed to load</div>";}}function renderRentals(){var f=document.getElementById("statusFilter").value;var items=f==="all"?allRentals:allRentals.filter(function(r){return r.status===f;});document.getElementById("rentalList").innerHTML=items.length?items.map(function(r){return "<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex items-center gap-4\\"><div class=\\"font-label-caps text-primary font-bold min-w-[60px]\\">"+r.plate+"</div><div class=\\"flex-1\\"><div class=\\"font-semibold text-sm\\">"+r.renter+"</div><div class=\\"text-xs text-on-surface-variant\\">"+r.model+(r.start?" · "+r.start+" -> "+r.end:"")+(r.days?" · "+r.days+"d":"")+(r.loggedBy?" - by "+r.loggedBy:"")+"</div></div><div class=\\"text-right\\"><span class=\\"text-xs px-2 py-1 rounded-full font-status-badge "+(r.status==="active"?"pill-active":"pill-done")+"\\">"+(r.status==="active"?"Active":"Done")+"</span>"+(r.price?"<div class=\\"text-sm font-semibold mt-1 font-label-caps\\">"+r.price+" THB</div>":"")+"</div></div>";}).join(""):"<div class=\\"text-on-surface-variant text-sm text-center py-8\\">No rentals found</div>";}loadRentals();setInterval(loadRentals,60000);</script>', isBossRole(auth)));
 });
 
 app.get('/ai-tasks', (req, res) => {
@@ -1219,7 +1225,7 @@ app.get('/rental-history', (req, res) => {
   const auth = checkDashboardAuth(req);
   if (!auth.ok) return res.redirect('/login');
   const token = req.query.token || '';
-  res.send(dashboardShell(token, 'Rental History', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Rental History</h2><div class="flex items-center gap-3"><input id="searchInput" class="text-sm border border-outline-variant rounded-lg px-3 py-1.5 bg-surface w-[200px]" placeholder="Search plate or name..." oninput="renderHistory()"></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-3"><div id="count" class="text-sm text-on-surface-variant"></div><div id="historyList" class="space-y-3"></div></div></main><script>var TOKEN=' + JSON.stringify(token) + ';var allHistory=[];async function loadHistory(){try{var res=await fetch("/api/toh/rental-history"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var data=await res.json();if(data.error){document.getElementById("historyList").innerHTML="<div class=\\"text-error\\">"+data.error+"</div>";return;}allHistory=data.history||[];renderHistory();}catch(err){document.getElementById("historyList").innerHTML="<div class=\\"text-error\\">Failed to load</div>";}}function renderHistory(){var q=(document.getElementById("searchInput").value||"").toLowerCase();var items=q?allHistory.filter(function(h){return (h.bike_id||"").toLowerCase().indexOf(q)>=0||(h.renter_name||"").toLowerCase().indexOf(q)>=0;}):allHistory;document.getElementById("count").textContent=items.length+" rental"+(items.length!==1?"s":"")+" logged";document.getElementById("historyList").innerHTML=items.length?items.map(function(h){return "<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-wrap items-center gap-3\\"><div class=\\"font-label-caps text-primary font-bold min-w-[50px]\\">"+(h.bike_id||"-")+"</div><div class=\\"flex-1 min-w-0\\"><div class=\\"font-semibold text-sm\\">"+(h.renter_name||"-")+"</div><div class=\\"text-xs text-on-surface-variant\\">"+(h.start_date||"")+" -> "+(h.end_date||"")+(h.days?" · "+h.days+" days":"")+"</div></div><div class=\\"flex items-center gap-3 ml-auto\\"><div class=\\"text-sm font-semibold font-label-caps\\">"+(h.price?h.price+" THB":"-")+"</div><div class=\\"text-xs text-on-surface-variant\\">"+(h.date_logged||"")+"</div></div></div>";}).join(""):"<div class=\\"text-on-surface-variant text-sm text-center py-12\\">No rental history yet</div>";}loadHistory();setInterval(loadHistory,120000);</script>', isBossRole(auth)));
+  res.send(dashboardShell(token, 'Rental History', '', '<main class="flex-1 md:ml-[280px] pb-24 md:pb-8"><header class="hidden md:flex justify-between items-center w-full px-margin-desktop h-16 z-30 bg-surface/80 backdrop-blur-md border-b border-outline-variant sticky top-0"><h2 class="font-headline-md text-headline-md text-on-surface font-semibold">Rental History</h2><div class="flex items-center gap-3"><input id="searchInput" class="text-sm border border-outline-variant rounded-lg px-3 py-1.5 bg-surface w-[200px]" placeholder="Search plate or name..." oninput="renderHistory()"></div></header><div class="p-margin-mobile md:p-margin-desktop max-w-7xl mx-auto space-y-3"><div id="count" class="text-sm text-on-surface-variant"></div><div id="historyList" class="space-y-3"></div></div></main><script>var TOKEN=' + JSON.stringify(token) + ';var allHistory=[];async function loadHistory(){try{var res=await fetch("/api/toh/rental-history"+(TOKEN?"?token="+encodeURIComponent(TOKEN):""));var data=await res.json();if(data.error){document.getElementById("historyList").innerHTML="<div class=\\"text-error\\">"+data.error+"</div>";return;}allHistory=data.history||[];renderHistory();}catch(err){document.getElementById("historyList").innerHTML="<div class=\\"text-error\\">Failed to load</div>";}}function renderHistory(){var q=(document.getElementById("searchInput").value||"").toLowerCase();var items=q?allHistory.filter(function(h){return (h.bike_id||"").toLowerCase().indexOf(q)>=0||(h.renter_name||"").toLowerCase().indexOf(q)>=0;}):allHistory;document.getElementById("count").textContent=items.length+" rental"+(items.length!==1?"s":"")+" logged";document.getElementById("historyList").innerHTML=items.length?items.map(function(h){return "<div class=\\"bg-surface-container-lowest border border-outline-variant rounded-xl p-4 flex flex-wrap items-center gap-3\\"><div class=\\"font-label-caps text-primary font-bold min-w-[50px]\\">"+(h.bike_id||"-")+"</div><div class=\\"flex-1 min-w-0\\"><div class=\\"font-semibold text-sm\\">"+(h.renter_name||"-")+"</div><div class=\\"text-xs text-on-surface-variant\\">"+(h.start_date||"")+" -> "+(h.end_date||"")+(h.days?" · "+h.days+" days":"")+"</div></div><div class=\\"flex items-center gap-3 ml-auto\\"><div class=\\"text-sm font-semibold font-label-caps\\">"+(h.price?h.price+" THB":"-")+"</div><div class=\\"text-xs text-on-surface-variant\\">"+(h.date_logged||"")+(h.logged_by?"<div class=\\\\"text-xs text-on-surface-variant\\\\">by "+h.logged_by+"</div>":"")+"</div></div></div>";}).join(""):"<div class=\\"text-on-surface-variant text-sm text-center py-12\\">No rental history yet</div>";}loadHistory();setInterval(loadHistory,120000);</script>', isBossRole(auth)));
 });
 
 app.get('/staff', (req, res) => {
