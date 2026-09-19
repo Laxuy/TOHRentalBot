@@ -130,7 +130,7 @@ function clean(str) {
   return str.replace(/\*\*/g, '').replace(/\*/g, '').trim();
 }
 
-async function appendToSheet(data) {
+async function recordBooking(data) {
   try {
     db.appendBooking(data);
     console.log('Booking saved to database');
@@ -288,7 +288,7 @@ async function findBikeRow(plateQuery) {
   return { bikeId: bike.plate, rowNumber: 0, status: bike.status, model: bike.model };
 }
 
-async function setBikeStatus(plateQuery, status, fleetSheetId, options = {}) {
+async function setBikeStatus(plateQuery, status, options = {}) {
   const bike = db.getMotorbikeByPlate(plateQuery);
   if (!bike) {
     return { ok: false, message: `Couldn't find a bike matching "${plateQuery}".` };
@@ -544,7 +544,7 @@ app.post('/webhook', async (req, res) => {
           const returnMatch = text.match(/^return\s+(\S+)(?:\s+(\d+(?:\.\d+)?))?\s*$/i);
           if (returnMatch) {
             const [, plate, priceStr] = returnMatch;
-            const result = await setBikeStatus(plate, 'Available', null, {
+            const result = await setBikeStatus(plate, 'Available', {
               price: priceStr || '',
               loggedBy: `WhatsApp Staff +${from}`,
             });
@@ -719,7 +719,7 @@ Be friendly, helpful and concise. Answer in the same language the customer write
           price: cleanReply.match(/Price[:\s]+([^\n]+)/i)?.[1],
         };
       }
-      await appendToSheet(bookingData);
+      await recordBooking(bookingData);
       const totalAmount = parseThbAmount(bookingData.price);
       if (totalAmount > 0) {
         await logFinance('Income', bookingData.bike, totalAmount, `Booking - ${bookingData.name || 'customer'}`, 'WhatsApp Bot');
@@ -812,7 +812,7 @@ app.post('/api/:shopId/motorbikes/:bikeId/status', async (req, res) => {
   try {
     getShop(req.params.shopId);
     const { status, renterName, renterPhone, expectedReturn, price } = req.body || {};
-    const result = await setBikeStatus(req.params.bikeId, status, null, {
+    const result = await setBikeStatus(req.params.bikeId, status, {
       renterName,
       renterPhone,
       expectedReturn,
