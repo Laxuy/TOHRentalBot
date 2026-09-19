@@ -422,6 +422,22 @@ function getStaffById(id) {
   return db.prepare('SELECT * FROM staff WHERE id = ?').get(id);
 }
 
+function normalizeThaiPhone(phone) {
+  let digits = String(phone).replace(/\D/g, '');
+  if (digits.startsWith('0') && digits.length === 10) {
+    digits = '66' + digits.slice(1);
+  }
+  return digits;
+}
+
+function getStaffByPhone(phone) {
+  const db = getDb();
+  const target = normalizeThaiPhone(phone);
+  if (!target) return null;
+  const all = db.prepare('SELECT * FROM staff').all();
+  return all.find(s => normalizeThaiPhone(s.phone) === target) || null;
+}
+
 function addStaff({ name, phone, role, shiftStart, shiftEnd }) {
   const db = getDb();
   const info = db.prepare(`
@@ -573,6 +589,7 @@ module.exports = {
   // staff
   getAllStaff,
   getStaffById,
+  getStaffByPhone,
   addStaff,
   removeStaff,
   checkInStaff,
