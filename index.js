@@ -12,8 +12,13 @@ app.use(express.json({
   verify: (req, res, buf) => { req.rawBody = buf; },
 }));
 app.use(express.urlencoded({ extended: true }));
+if (!process.env.SESSION_SECRET) {
+  console.error('FATAL: SESSION_SECRET environment variable is not set. Refusing to start with an insecure default.');
+  process.exit(1);
+}
+
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'change-this-in-railway-env-vars',
+  secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: { maxAge: 7 * 24 * 60 * 60 * 1000 }, // 7 days
@@ -23,10 +28,13 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const STAFF_GROUP_ID = process.env.STAFF_GROUP_ID;
-const STAFF_NUMBERS = (process.env.STAFF_NUMBERS || '66950615202')
+const STAFF_NUMBERS = (process.env.STAFF_NUMBERS || '')
   .split(',')
   .map(n => n.trim())
   .filter(Boolean);
+if (STAFF_NUMBERS.length === 0) {
+  console.warn('WARNING: STAFF_NUMBERS environment variable is not set. Staff commands and notifications will not work until it is configured.');
+}
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const MY_NUMBER = process.env.MY_NUMBER;
 const WHATSAPP_APP_SECRET = process.env.WHATSAPP_APP_SECRET || '';
