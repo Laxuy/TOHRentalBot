@@ -1,13 +1,16 @@
 const express = require('express');
 const axios = require('axios');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const session = require('express-session');
 const { extractContractData, shouldAutoFill, describeExtraction } = require('./contractExtractor');
 const { getShop } = require('./config/shops');
 const db = require('./database');
 require('dotenv').config();
 const app = express();
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => { req.rawBody = buf; },
+}));
 app.use(express.urlencoded({ extended: true }));
 app.use(session({
   secret: process.env.SESSION_SECRET || 'change-this-in-railway-env-vars',
@@ -26,6 +29,21 @@ const STAFF_NUMBERS = (process.env.STAFF_NUMBERS || '66950615202')
   .filter(Boolean);
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const MY_NUMBER = process.env.MY_NUMBER;
+const WHATSAPP_APP_SECRET = process.env.WHATSAPP_APP_SECRET || '';
+
+function verifyWebhookSignature(req) {
+  if (!WHATSAPP_APP_SECRET) return { ok: false, reason: 'WHATSAPP_APP_SECRET not configured' };
+  const signature = req.get('X-Hub-Signature-256') || '';
+  if (!signature.startsWith('sha256=')) return { ok: false, reason: 'Missing or malformed signature header' };
+  if (!req.rawBody) return { ok: false, reason: 'No raw body captured' };
+  const expected = 'sha256=' + crypto.createHmac('sha256', WHATSAPP_APP_SECRET).update(req.rawBody).digest('hex');
+  const sigBuf = Buffer.from(signature);
+  const expBuf = Buffer.from(expected);
+  if (sigBuf.length !== expBuf.length) return { ok: false, reason: 'Signature length mismatch' };
+  const valid = crypto.timingSafeEqual(sigBuf, expBuf);
+  return valid ? { ok: true } : { ok: false, reason: 'Signature mismatch' };
+}
+
 function checkDashboardAuth(req) {
   if (req.session && req.session.user) {
     return { ok: true, user: req.session.user.username, role: req.session.user.role };
@@ -477,6 +495,11 @@ app.get('/webhook', (req, res) => {
 });
 
 app.post('/webhook', async (req, res) => {
+  const sigCheck = verifyWebhookSignature(req);
+  if (!sigCheck.ok) {
+    console.error('Webhook signature rejected:', sigCheck.reason);
+    return res.sendStatus(401);
+  }
   const body = req.body;
   if (body.object === 'whatsapp_business_account') {
     const message = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
