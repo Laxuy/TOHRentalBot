@@ -134,6 +134,15 @@ function createTables() {
       last_login_at TEXT DEFAULT ''
     );
   `);
+
+  // Lightweight migration: add payment-status tracking to finance
+  // (SQLite can't alter a CHECK constraint, so we track pending payments
+  // via a separate status column instead of a new finance "type").
+  try {
+    db.exec("ALTER TABLE finance ADD COLUMN status TEXT DEFAULT 'Confirmed'");
+  } catch (e) {
+    // column already exists — safe to ignore
+  }
 }
 
 // ─── Motorbikes ────────────────────────────────────────────
@@ -275,25 +284,33 @@ function getRecentBookings(limit = 10) {
 
 // ─── Finance ────────────────────────────────────────────────
 
-function logFinance(type, bike, amount, description, reportedBy) {
+function logFinance(type, bike, amount, description, reportedBy, status) {
   const db = getDb();
   const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
   db.prepare(`
-    INSERT INTO finance (date, type, bike, amount, description, reported_by)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(now, type, bike || '-', amount, description || '-', reportedBy || 'WhatsApp Bot');
+    INSERT INTO finance (date, type, bike, amount, description, reported_by, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(now, type, bike || '-', amount, description || '-', reportedBy || 'WhatsApp Bot', status || 'Confirmed');
 }
 
 function getFinanceSummary() {
   const db = getDb();
-  const rows = db.prepare('SELECT type, amount FROM finance').all();
+  const rows = db.prepare('SELECT type, amount, status FROM finance').all();
   let income = 0, expense = 0;
   rows.forEach(r => {
     const t = (r.type || '').trim().toLowerCase();
-    if (t === 'income') income += r.amount;
+    const s = (r.status || 'Confirmed').trim().toLowerCase();
+    if (t === 'income' && s !== 'pending') income += r.amount;
     else if (t === 'expense') expense += r.amount;
   });
   return { income, expense, net: income - expense, count: rows.length };
+}
+
+function getPendingPayments() {
+  const db = getDb();
+  return db.prepare(`
+    SELECT * FROM finance WHERE type = 'Income' AND status = 'Pending' ORDER BY id DESC
+  `).all();
 }
 
 // ─── Tasks ──────────────────────────────────────────────────
@@ -525,6 +542,7 @@ module.exports = {
   // finance
   logFinance,
   getFinanceSummary,
+  getPendingPayments,
   // tasks
   logTask,
   getTasks,
