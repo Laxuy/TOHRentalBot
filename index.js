@@ -340,6 +340,15 @@ async function findBikeRow(plateQuery) {
 }
 
 async function setBikeStatus(plateQuery, status, options = {}) {
+  const result = await setBikeStatusInner(plateQuery, status, options);
+  if (result.ok) {
+    const who = options.loggedBy ? ` (by ${options.loggedBy})` : '';
+    notifyStaff(`${result.message}${who}`).catch(err => console.error('Staff notify failed:', err.message));
+  }
+  return result;
+}
+
+async function setBikeStatusInner(plateQuery, status, options = {}) {
   const bike = db.getMotorbikeByPlate(plateQuery);
   if (!bike) {
     return { ok: false, message: `Couldn't find a bike matching "${plateQuery}".` };
