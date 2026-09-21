@@ -143,6 +143,19 @@ function createTables() {
   } catch (e) {
     // column already exists — safe to ignore
   }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS conversations (
+      phone TEXT PRIMARY KEY,
+      history TEXT NOT NULL DEFAULT '[]',
+      updated_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS processed_messages (
+      message_id TEXT PRIMARY KEY,
+      created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+  `);
 }
 
 // ─── Motorbikes ────────────────────────────────────────────
@@ -325,6 +338,47 @@ function getPendingPayments() {
   return db.prepare(`
     SELECT * FROM finance WHERE type = 'Income' AND status = 'Pending' ORDER BY id DESC
   `).all();
+}
+
+// ─── Conversations (chat memory) ────────────────────────────
+
+function getConversationHistory(phone) {
+  const db = getDb();
+  const row = db.prepare('SELECT history FROM conversations WHERE phone = ?').get(phone);
+  if (!row) return [];
+  try {
+    return JSON.parse(row.history);
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveConversationHistory(phone, history) {
+  const db = getDb();
+  const json = JSON.stringify(history);
+  db.prepare(`
+    INSERT INTO conversations (phone, history, updated_at)
+    VALUES (?, ?, datetime('now','localtime'))
+    ON CONFLICT(phone) DO UPDATE SET history = excluded.history, updated_at = excluded.updated_at
+  `).run(phone, json);
+}
+
+// ─── Processed message dedup ────────────────────────────────
+
+function hasProcessedMessage(messageId) {
+  const db = getDb();
+  return !!db.prepare('SELECT 1 FROM processed_messages WHERE message_id = ?').get(messageId);
+}
+
+function markMessageProcessed(messageId) {
+  const db = getDb();
+  try {
+    db.prepare('INSERT INTO processed_messages (message_id) VALUES (?)').run(messageId);
+  } catch (e) {
+    // already exists — fine, dedup still holds
+  }
+  // Keep the table small: drop entries older than 24 hours.
+  db.prepare(`DELETE FROM processed_messages WHERE created_at < datetime('now','-1 day','localtime')`).run();
 }
 
 // ─── Tasks ──────────────────────────────────────────────────
@@ -574,6 +628,12 @@ module.exports = {
   logFinance,
   getFinanceSummary,
   getPendingPayments,
+  // conversations
+  getConversationHistory,
+  saveConversationHistory,
+  // message dedup
+  hasProcessedMessage,
+  markMessageProcessed,
   // tasks
   logTask,
   getTasks,
