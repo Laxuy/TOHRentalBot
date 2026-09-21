@@ -168,9 +168,6 @@ app.post('/setup', async (req, res) => {
   res.send('Admin account created. <a href="/login">Go to login</a>.');
 });
 
-const conversations = {};
-const processedMessages = new Set();
-
 function clean(str) {
   if (!str) return '';
   return str.replace(/\*\*/g, '').replace(/\*/g, '').trim();
@@ -582,8 +579,8 @@ app.post('/webhook', async (req, res) => {
     const message = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (message) {
       const msgId = message.id;
-      if (processedMessages.has(msgId)) return res.sendStatus(200);
-      processedMessages.add(msgId);
+      if (db.hasProcessedMessage(msgId)) return res.sendStatus(200);
+      db.markMessageProcessed(msgId);
       const from = message.from;
 
       if (message.type === 'text') {
@@ -726,11 +723,10 @@ async function extractBookingJSON(summaryText) {
 
 async function handleMessage(from, text) {
   const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
-  if (!conversations[from]) {
-    conversations[from] = { history: [], bookingData: {}, stage: 'chat' };
-  }
-  const conv = conversations[from];
-  conv.history.push({ role: 'user', parts: [{ text }] });
+  const history = db.getConversationHistory(from);
+  history.push({ role: 'user', parts: [{ text }] });
+  db.saveConversationHistory(from, history);
+  const conv = { history };
 
   const fleetData = await getFleetAvailability();
   const fleetSummary = formatFleetSummary(fleetData);
@@ -789,6 +785,7 @@ Be friendly, helpful and concise. Answer in the same language the customer write
     });
     const reply = response.data.candidates[0].content.parts[0].text;
     conv.history.push({ role: 'model', parts: [{ text: reply }] });
+    db.saveConversationHistory(from, conv.history);
 
     if (reply.includes('BOOKING_COMPLETE')) {
       const cleanReply = reply.replace('BOOKING_COMPLETE', '').trim();
