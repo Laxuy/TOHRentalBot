@@ -156,6 +156,12 @@ function createTables() {
       created_at TEXT DEFAULT (datetime('now','localtime'))
     );
   `);
+
+  try {
+    db.exec("ALTER TABLE staff ADD COLUMN photo TEXT DEFAULT ''");
+  } catch (e) {
+    // column already exists — safe to ignore
+  }
 }
 
 // ─── Motorbikes ────────────────────────────────────────────
@@ -574,6 +580,21 @@ function editStaffHours(id, todayHours, weekHours, editedBy) {
   return { ok: true };
 }
 
+function setStaffPhoto(id, photoDataUrl) {
+  const db = getDb();
+  const staff = getStaffById(id);
+  if (!staff) return { ok: false, message: 'Staff not found' };
+  if (photoDataUrl && !/^data:image\/(jpeg|jpg|png|webp);base64,/.test(photoDataUrl)) {
+    return { ok: false, message: 'Invalid image format' };
+  }
+  if (photoDataUrl && photoDataUrl.length > 700000) {
+    return { ok: false, message: 'Image too large (max ~500KB)' };
+  }
+  db.prepare(`UPDATE staff SET photo=?, updated_at=datetime('now','localtime') WHERE id=?`)
+    .run(photoDataUrl || '', id);
+  return { ok: true };
+}
+
 // ─── Users (login) ───────────────────────────────────────────
 
 function getUserByUsername(username) {
@@ -667,6 +688,7 @@ module.exports = {
   setStaffLeave,
   updateStaffShift,
   editStaffHours,
+  setStaffPhoto,
   // users
   getUserByUsername,
   getUserById,
