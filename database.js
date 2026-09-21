@@ -228,12 +228,18 @@ function createRental(rental) {
   if (bike.status === 'Maintenance') return { ok: false, message: `${rental.plate} is in Maintenance` };
   if (bike.status === 'Reserved') return { ok: false, message: `${rental.plate} is Reserved` };
 
-  const stmt = db.prepare(`
-    INSERT INTO rentals (plate, customer_name, customer_phone, start_date, end_date, price, status, logged_by)
-    VALUES (@plate, @customer_name, @customer_phone, @start_date, @end_date, @price, 'active', @logged_by)
-  `);
-  stmt.run(rental);
-  updateBikeStatus(rental.plate, 'Rented');
+  const doCreate = db.transaction((r) => {
+    db.prepare(`
+      INSERT INTO rentals (plate, customer_name, customer_phone, start_date, end_date, price, status, logged_by)
+      VALUES (@plate, @customer_name, @customer_phone, @start_date, @end_date, @price, 'active', @logged_by)
+    `).run(r);
+    db.prepare(`
+      UPDATE motorbikes SET status = ?, updated_at = datetime('now','localtime')
+      WHERE plate = ?
+    `).run('Rented', r.plate);
+  });
+  doCreate(rental);
+
   return { ok: true, plate: rental.plate, customer: rental.customer_name };
 }
 
@@ -246,23 +252,27 @@ function completeRental(plate, price, loggedBy) {
   if (!active) return { ok: false, message: `No active rental found for ${plate}` };
 
   const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok' });
-
-  db.prepare('UPDATE rentals SET status = ?, price = COALESCE(NULLIF(?,0), price) WHERE id = ?')
-    .run('done', price || 0, active.id);
-  updateBikeStatus(plate, 'Available');
-
-  // Log rental history
   const startDate = active.start_date;
   const endDate = today;
   let days = 0;
   const parseDate = s => { const [d,m,y] = String(s).split('/').map(Number); return new Date(y,m-1,d); };
   const sd = parseDate(startDate), ed = parseDate(endDate);
   if (sd && ed) days = Math.max(0, Math.round((ed - sd) / 86400000));
+  const finalPrice = price || active.price || '';
 
-  db.prepare(`
-    INSERT INTO rental_history (date_logged, bike_id, model, renter_name, renter_phone, start_date, end_date, days, price, logged_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(today, plate, '', active.customer_name, active.customer_phone, startDate, endDate, days, price || active.price || '', loggedBy || '');
+  const doComplete = db.transaction(() => {
+    db.prepare('UPDATE rentals SET status = ?, price = COALESCE(NULLIF(?,0), price) WHERE id = ?')
+      .run('done', price || 0, active.id);
+    db.prepare(`
+      UPDATE motorbikes SET status = ?, updated_at = datetime('now','localtime')
+      WHERE plate = ?
+    `).run('Available', plate);
+    db.prepare(`
+      INSERT INTO rental_history (date_logged, bike_id, model, renter_name, renter_phone, start_date, end_date, days, price, logged_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(today, plate, '', active.customer_name, active.customer_phone, startDate, endDate, days, finalPrice, loggedBy || '');
+  });
+  doComplete();
 
   return { ok: true, plate, customer: active.customer_name };
 }
