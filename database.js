@@ -178,6 +178,12 @@ function createTables() {
   } catch (e) {
     // column already exists — safe to ignore
   }
+  try {
+    db.exec("ALTER TABLE rentals ADD COLUMN pickup_location TEXT DEFAULT ''");
+  } catch (e) {}
+  try {
+    db.exec("ALTER TABLE rental_history ADD COLUMN pickup_location TEXT DEFAULT ''");
+  } catch (e) {}
 }
 
 // ─── Motorbikes ────────────────────────────────────────────
@@ -252,9 +258,9 @@ function createRental(rental) {
 
   const doCreate = db.transaction((r) => {
     db.prepare(`
-      INSERT INTO rentals (plate, customer_name, customer_phone, start_date, end_date, price, status, logged_by)
-      VALUES (@plate, @customer_name, @customer_phone, @start_date, @end_date, @price, 'active', @logged_by)
-    `).run(r);
+      INSERT INTO rentals (plate, customer_name, customer_phone, start_date, end_date, price, status, logged_by, pickup_location)
+      VALUES (@plate, @customer_name, @customer_phone, @start_date, @end_date, @price, 'active', @logged_by, @pickup_location)
+    `).run({ pickup_location: '', ...r });
     db.prepare(`
       UPDATE motorbikes SET status = ?, updated_at = datetime('now','localtime')
       WHERE plate = ?
@@ -290,9 +296,9 @@ function completeRental(plate, price, loggedBy) {
       WHERE plate = ?
     `).run('Available', plate);
     db.prepare(`
-      INSERT INTO rental_history (date_logged, bike_id, model, renter_name, renter_phone, start_date, end_date, days, price, logged_by)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(today, plate, '', active.customer_name, active.customer_phone, startDate, endDate, days, finalPrice, loggedBy || '');
+      INSERT INTO rental_history (date_logged, bike_id, model, renter_name, renter_phone, start_date, end_date, days, price, logged_by, pickup_location)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(today, plate, '', active.customer_name, active.customer_phone, startDate, endDate, days, finalPrice, loggedBy || '', active.pickup_location || '');
   });
   doComplete();
 
