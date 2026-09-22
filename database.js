@@ -155,6 +155,22 @@ function createTables() {
       message_id TEXT PRIMARY KEY,
       created_at TEXT DEFAULT (datetime('now','localtime'))
     );
+
+    CREATE TABLE IF NOT EXISTS deposits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      plate TEXT NOT NULL,
+      rental_id INTEGER,
+      renter_name TEXT DEFAULT '',
+      deposit_type TEXT NOT NULL CHECK(deposit_type IN ('passport','cash')),
+      amount_collected REAL DEFAULT 0,
+      amount_refunded REAL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'held' CHECK(status IN ('held','partial','returned')),
+      deduction_reason TEXT DEFAULT '',
+      collected_by TEXT DEFAULT '',
+      collected_at TEXT DEFAULT (datetime('now','localtime')),
+      refunded_by TEXT DEFAULT '',
+      refunded_at TEXT DEFAULT ''
+    );
   `);
 
   try {
@@ -595,6 +611,54 @@ function setStaffPhoto(id, photoDataUrl) {
   return { ok: true };
 }
 
+// ─── Deposits ───────────────────────────────────────────────
+
+function collectDeposit({ plate, rentalId, renterName, depositType, amount, collectedBy }) {
+  const db = getDb();
+  if (!['passport', 'cash'].includes(depositType)) {
+    return { ok: false, message: 'Deposit type must be passport or cash' };
+  }
+  const amt = depositType === 'cash' ? (parseFloat(amount) || 0) : 0;
+  const info = db.prepare(`
+    INSERT INTO deposits (plate, rental_id, renter_name, deposit_type, amount_collected, status, collected_by)
+    VALUES (?, ?, ?, ?, ?, 'held', ?)
+  `).run(plate, rentalId || null, renterName || '', depositType, amt, collectedBy || '');
+  return { ok: true, id: info.lastInsertRowid };
+}
+
+function getActiveDepositForPlate(plate) {
+  const db = getDb();
+  return db.prepare(`
+    SELECT * FROM deposits WHERE plate = ? AND status = 'held' ORDER BY id DESC LIMIT 1
+  `).get(plate);
+}
+
+function refundDeposit(depositId, amountRefunded, deductionReason, refundedBy) {
+  const db = getDb();
+  const deposit = db.prepare('SELECT * FROM deposits WHERE id = ?').get(depositId);
+  if (!deposit) return { ok: false, message: 'Deposit not found' };
+  const refund = Math.max(0, Math.min(parseFloat(amountRefunded) || 0, deposit.amount_collected));
+  const status = refund >= deposit.amount_collected && deposit.amount_collected > 0 ? 'returned'
+    : deposit.deposit_type === 'passport' ? 'returned'
+    : 'partial';
+  const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
+  db.prepare(`
+    UPDATE deposits SET amount_refunded=?, status=?, deduction_reason=?, refunded_by=?, refunded_at=?
+    WHERE id=?
+  `).run(refund, status, deductionReason || '', refundedBy || '', now, depositId);
+  return { ok: true, status };
+}
+
+function getOpenDeposits() {
+  const db = getDb();
+  return db.prepare(`SELECT * FROM deposits WHERE status = 'held' ORDER BY id DESC`).all();
+}
+
+function getAllDeposits() {
+  const db = getDb();
+  return db.prepare(`SELECT * FROM deposits ORDER BY id DESC`).all();
+}
+
 // ─── Users (login) ───────────────────────────────────────────
 
 function getUserByUsername(username) {
@@ -689,6 +753,12 @@ module.exports = {
   updateStaffShift,
   editStaffHours,
   setStaffPhoto,
+  // deposits
+  collectDeposit,
+  getActiveDepositForPlate,
+  refundDeposit,
+  getOpenDeposits,
+  getAllDeposits,
   // users
   getUserByUsername,
   getUserById,
