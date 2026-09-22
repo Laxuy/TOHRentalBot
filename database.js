@@ -184,6 +184,20 @@ function createTables() {
   try {
     db.exec("ALTER TABLE rental_history ADD COLUMN pickup_location TEXT DEFAULT ''");
   } catch (e) {}
+
+  // Multi-tenant: tag every table with which shop it belongs to.
+  // Existing rows all belong to 'toh' (the default), so nothing changes
+  // for the current data — this only matters once a second shop exists.
+  const shopIdTables = [
+    'motorbikes', 'rentals', 'bookings', 'finance', 'tasks',
+    'rental_history', 'photos', 'staff', 'staff_edits', 'users',
+    'deposits', 'conversations',
+  ];
+  shopIdTables.forEach(table => {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN shop_id TEXT DEFAULT 'toh'`);
+    } catch (e) {}
+  });
 }
 
 // ─── Motorbikes ────────────────────────────────────────────
