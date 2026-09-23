@@ -198,6 +198,73 @@ function createTables() {
       db.exec(`ALTER TABLE ${table} ADD COLUMN shop_id TEXT DEFAULT 'toh'`);
     } catch (e) {}
   });
+
+  migrateToCompositeKeys();
+}
+
+function migrateToCompositeKeys() {
+  const db = getDb();
+  db.exec(`CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  const done = db.prepare(`SELECT value FROM schema_meta WHERE key = 'composite_keys_v1'`).get();
+  if (done) return; // already migrated
+
+  const runMigration = db.transaction(() => {
+    // Rebuild motorbikes with a composite (shop_id, plate) primary key,
+    // so two different shops can safely use the same plate/code.
+    db.exec(`
+      CREATE TABLE motorbikes_new (
+        shop_id TEXT NOT NULL DEFAULT 'toh',
+        plate TEXT NOT NULL,
+        model TEXT NOT NULL,
+        color TEXT DEFAULT '',
+        location TEXT DEFAULT '',
+        status TEXT DEFAULT 'Available' CHECK(status IN ('Available','Rented','Maintenance','Reserved')),
+        notes TEXT DEFAULT '',
+        updated_at TEXT DEFAULT (datetime('now','localtime')),
+        PRIMARY KEY (shop_id, plate)
+      );
+    `);
+    db.exec(`
+      INSERT INTO motorbikes_new (shop_id, plate, model, color, location, status, notes, updated_at)
+      SELECT COALESCE(shop_id,'toh'), plate, model, color, location, status, notes, updated_at FROM motorbikes;
+    `);
+    db.exec(`DROP TABLE motorbikes;`);
+    db.exec(`ALTER TABLE motorbikes_new RENAME TO motorbikes;`);
+
+    // Rebuild rentals without the old single-column FK to motorbikes(plate),
+    // which no longer matches now that the key is composite. Shop scoping
+    // is handled at the application level (shop_id + plate together).
+    db.exec(`
+      CREATE TABLE rentals_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        shop_id TEXT NOT NULL DEFAULT 'toh',
+        plate TEXT NOT NULL,
+        customer_name TEXT NOT NULL,
+        customer_phone TEXT DEFAULT '',
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        price REAL DEFAULT 0,
+        status TEXT DEFAULT 'active' CHECK(status IN ('active','done')),
+        logged_by TEXT DEFAULT '',
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        pickup_location TEXT DEFAULT ''
+      );
+    `);
+    db.exec(`
+      INSERT INTO rentals_new (id, shop_id, plate, customer_name, customer_phone, start_date, end_date, price, status, logged_by, created_at, pickup_location)
+      SELECT id, COALESCE(shop_id,'toh'), plate, customer_name, customer_phone, start_date, end_date, price, status, logged_by, created_at, COALESCE(pickup_location,'') FROM rentals;
+    `);
+    db.exec(`DROP TABLE rentals;`);
+    db.exec(`ALTER TABLE rentals_new RENAME TO rentals;`);
+
+    db.prepare(`INSERT INTO schema_meta (key, value) VALUES ('composite_keys_v1', datetime('now','localtime'))`).run();
+  });
+  db.pragma('foreign_keys = OFF');
+  try {
+    runMigration();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
 }
 
 // ─── Motorbikes ────────────────────────────────────────────
