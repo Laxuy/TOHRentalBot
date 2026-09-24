@@ -293,15 +293,16 @@ function findMotorbikesByCode(plate) {
   return db.prepare('SELECT * FROM motorbikes WHERE plate LIKE ?').all('%' + query);
 }
 
-function upsertMotorbike(bike) {
+function upsertMotorbike(bike, shopId) {
   const db = getDb();
+  const b = { shop_id: shopId || bike.shop_id || 'toh', ...bike };
   return db.prepare(`
-    INSERT INTO motorbikes (plate, model, color, location, status, notes)
-    VALUES (@plate, @model, @color, @location, @status, @notes)
-    ON CONFLICT(plate) DO UPDATE SET
+    INSERT INTO motorbikes (shop_id, plate, model, color, location, status, notes)
+    VALUES (@shop_id, @plate, @model, @color, @location, @status, @notes)
+    ON CONFLICT(shop_id, plate) DO UPDATE SET
       model=excluded.model, color=excluded.color, location=excluded.location,
       status=excluded.status, notes=excluded.notes, updated_at=datetime('now','localtime')
-  `).run(bike);
+  `).run(b);
 }
 
 function updateBikeStatus(plate, status) {
