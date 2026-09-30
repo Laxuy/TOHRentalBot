@@ -221,17 +221,17 @@ async function logTask(type, description, contact) {
   }
 }
 
-async function getTasks() {
+async function getTasks(shopId = 'toh') {
   try {
-    return db.getTasks();
+    return db.getTasks(shopId);
   } catch (err) {
     console.error('Tasks read error:', err.message);
     return [];
   }
 }
 
-async function resolveTask(taskId) {
-  return db.resolveTask(taskId);
+async function resolveTask(taskId, shopId = 'toh') {
+  return db.resolveTask(taskId, shopId);
 }
 
 async function getBookingsWithIssues() {
@@ -313,18 +313,18 @@ function daysBetweenEnGBDates(startStr, endStr) {
   return Math.max(0, Math.round(diffMs / (1000 * 60 * 60 * 24)));
 }
 
-async function getAllRentalHistory() {
+async function getAllRentalHistory(shopId = 'toh') {
   try {
-    return db.getAllRentalHistory();
+    return db.getAllRentalHistory(shopId);
   } catch (err) {
     console.error('Rental history error:', err.message);
     return [];
   }
 }
 
-async function getRentalHistoryForBike(bikeId) {
+async function getRentalHistoryForBike(bikeId, shopId = 'toh') {
   try {
-    return db.getRentalHistoryForBike(bikeId);
+    return db.getRentalHistoryForBike(bikeId, shopId);
   } catch (err) {
     console.error('Bike history error:', err.message);
     return [];
@@ -337,8 +337,8 @@ async function findBikeRow(plateQuery) {
   return { bikeId: bike.plate, rowNumber: 0, status: bike.status, model: bike.model };
 }
 
-async function setBikeStatus(plateQuery, status, options = {}) {
-  const result = await setBikeStatusInner(plateQuery, status, options);
+async function setBikeStatus(plateQuery, status, options = {}, shopId = 'toh') {
+  const result = await setBikeStatusInner(plateQuery, status, options, shopId);
   if (result.ok) {
     const who = options.loggedBy ? ` (by ${options.loggedBy})` : '';
     notifyStaff(`${result.message}${who}`).catch(err => console.error('Staff notify failed:', err.message));
@@ -346,8 +346,8 @@ async function setBikeStatus(plateQuery, status, options = {}) {
   return result;
 }
 
-async function setBikeStatusInner(plateQuery, status, options = {}) {
-  const bike = db.getMotorbikeByPlate(plateQuery);
+async function setBikeStatusInner(plateQuery, status, options = {}, shopId = 'toh') {
+  const bike = db.getMotorbikeByPlate(plateQuery, shopId);
   if (!bike) {
     return { ok: false, message: `Couldn't find a bike matching "${plateQuery}".` };
   }
@@ -372,7 +372,7 @@ async function setBikeStatusInner(plateQuery, status, options = {}) {
       price: parseFloat(options.price) || 0,
       logged_by: options.loggedBy || '',
       pickup_location: options.pickupLocation || '',
-    });
+    }, shopId);
     if (!result.ok) return result;
     if (options.paymentStatus === 'paid' && parseFloat(options.price) > 0) {
       await logFinance('Income', bike.plate, parseFloat(options.price), `Rental - ${options.renterName || result.customer || 'customer'}`, options.loggedBy || 'Staff', 'Confirmed');
@@ -392,14 +392,14 @@ async function setBikeStatusInner(plateQuery, status, options = {}) {
     if (bike.status === 'Maintenance') {
       return { ok: false, message: `${bike.plate} is in Maintenance - clear that status first.` };
     }
-    const result = db.completeRental(bike.plate, options.price || '0', options.loggedBy || '');
+    const result = db.completeRental(bike.plate, options.price || '0', options.loggedBy || '', shopId);
     if (!result.ok) return result;
     return { ok: true, message: `${bike.plate} marked as Available (returned from ${result.customer}).` };
   }
 
   const statusMap = { Maintenance: 'Maintenance', maintenance: 'Maintenance', Reserved: 'Reserved', reserved: 'Reserved' };
   const newStatus = statusMap[status] || status;
-  db.updateBikeStatus(bike.plate, newStatus);
+  db.updateBikeStatus(bike.plate, newStatus, shopId);
   return { ok: true, message: `${bike.plate} marked as ${newStatus}.` };
 }
 
@@ -427,18 +427,18 @@ async function autoFillContractToFleet(extracted) {
   return { ok: true, message: `${bike.plate} auto-filled from contract (${extracted.renterName}).` };
 }
 
-async function getFleetAvailability() {
+async function getFleetAvailability(shopId = 'toh') {
   try {
-    return db.getFleetAvailability();
+    return db.getFleetAvailability(shopId);
   } catch (err) {
     console.error('Fleet availability error:', err.message);
     return {};
   }
 }
 
-async function getFleetList() {
-  const bikes = db.getAllMotorbikes();
-  const activeRentals = db.getActiveRentals();
+async function getFleetList(shopId = 'toh') {
+  const bikes = db.getAllMotorbikes(shopId);
+  const activeRentals = db.getActiveRentals(shopId);
   const byPlate = new Map(activeRentals.map(r => [r.plate, r]));
   return bikes.map(b => {
     const rental = byPlate.get(b.plate);
@@ -865,8 +865,8 @@ async function getRecentPhotos() {
   return db.getRecentPhotos(10);
 }
 
-async function getDashboardStats() {
-  const stats = db.getDashboardStats();
+async function getDashboardStats(shopId = 'toh') {
+  const stats = db.getDashboardStats(shopId);
   return {
     activeRentals: stats.activeRentals || 0,
     openTasks: stats.openTasks || 0,
@@ -881,23 +881,12 @@ async function getDashboardStats() {
   };
 }
 
-app.get('/api/dashboard-data', async (req, res) => {
-  try {
-    const stats = await getDashboardStats();
-    const bookings = await getRecentBookings();
-    const photos = await getRecentPhotos();
-    res.json({ stats, bookings, photos });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 app.get('/api/:shopId/motorbikes', async (req, res) => {
   const auth = checkDashboardAuth(req);
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
     getShop(req.params.shopId);
-    const bikes = await getFleetList();
+    const bikes = await getFleetList(req.params.shopId);
     res.json({ bikes });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -912,7 +901,7 @@ app.post('/api/:shopId/motorbikes', async (req, res) => {
     getShop(req.params.shopId);
     const { plate, model, color, location, notes } = req.body || {};
     if (!plate || !model) return res.status(400).json({ error: 'plate and model are required' });
-    const existing = db.getMotorbikeByPlate(plate);
+    const existing = db.getMotorbikeByPlate(plate, req.params.shopId);
     if (existing) return res.status(400).json({ error: 'A bike with that plate/code already exists' });
     db.upsertMotorbike({
       plate: plate.trim(),
@@ -955,7 +944,7 @@ app.get('/api/:shopId/motorbikes/:bikeId/history', async (req, res) => {
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
     getShop(req.params.shopId);
-    const history = await getRentalHistoryForBike(req.params.bikeId);
+    const history = await getRentalHistoryForBike(req.params.bikeId, req.params.shopId);
     res.json({ history });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -967,7 +956,7 @@ app.get('/api/:shopId/rentals', async (req, res) => {
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
     getShop(req.params.shopId);
-    const bookings = db.getActiveRentals();
+    const bookings = db.getActiveRentals(req.params.shopId);
     res.json({ bookings });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -979,7 +968,7 @@ app.get('/api/:shopId/dashboard', async (req, res) => {
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
     getShop(req.params.shopId);
-    const data = await getDashboardStats();
+    const data = await getDashboardStats(req.params.shopId);
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -991,7 +980,7 @@ app.get('/api/:shopId/tasks', async (req, res) => {
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
     getShop(req.params.shopId);
-    const tasks = await getTasks();
+    const tasks = await getTasks(req.params.shopId);
     res.json({ tasks });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1003,7 +992,7 @@ app.post('/api/:shopId/tasks/:taskId/resolve', async (req, res) => {
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
     getShop(req.params.shopId);
-    const result = await resolveTask(req.params.taskId);
+    const result = await resolveTask(req.params.taskId, req.params.shopId);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1027,7 +1016,7 @@ app.get('/api/:shopId/rental-history', async (req, res) => {
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
     getShop(req.params.shopId);
-    const history = await getAllRentalHistory();
+    const history = await getAllRentalHistory(req.params.shopId);
     res.json({ history });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1039,7 +1028,7 @@ app.get('/api/:shopId/staff', async (req, res) => {
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
     getShop(req.params.shopId);
-    const staff = db.getAllStaff();
+    const staff = db.getAllStaff(req.params.shopId);
     res.json({ staff });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1054,7 +1043,7 @@ app.post('/api/:shopId/staff', async (req, res) => {
     getShop(req.params.shopId);
     const { name, phone, role, shiftStart, shiftEnd } = req.body || {};
     if (!name || !role) return res.status(400).json({ error: 'name and role are required' });
-    const result = db.addStaff({ name, phone, role, shiftStart, shiftEnd });
+    const result = db.addStaff({ name, phone, role, shiftStart, shiftEnd, shopId: req.params.shopId });
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1067,7 +1056,7 @@ app.delete('/api/:shopId/staff/:staffId', async (req, res) => {
   if (!isBossRole(auth)) return res.status(403).json({ error: 'Boss access only' });
   try {
     getShop(req.params.shopId);
-    const result = db.removeStaff(req.params.staffId);
+    const result = db.removeStaff(req.params.staffId, req.params.shopId);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1079,7 +1068,7 @@ app.post('/api/:shopId/staff/:staffId/checkin', async (req, res) => {
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
     getShop(req.params.shopId);
-    const result = db.checkInStaff(req.params.staffId);
+    const result = db.checkInStaff(req.params.staffId, req.params.shopId);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1091,7 +1080,7 @@ app.post('/api/:shopId/staff/:staffId/checkout', async (req, res) => {
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
     getShop(req.params.shopId);
-    const result = db.checkOutStaff(req.params.staffId);
+    const result = db.checkOutStaff(req.params.staffId, req.params.shopId);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1103,7 +1092,7 @@ app.post('/api/:shopId/staff/:staffId/leave', async (req, res) => {
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
     getShop(req.params.shopId);
-    const result = db.setStaffLeave(req.params.staffId);
+    const result = db.setStaffLeave(req.params.staffId, req.params.shopId);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1117,7 +1106,7 @@ app.post('/api/:shopId/staff/:staffId/shift', async (req, res) => {
   try {
     getShop(req.params.shopId);
     const { shiftStart, shiftEnd } = req.body || {};
-    const result = db.updateStaffShift(req.params.staffId, shiftStart, shiftEnd, auth.user);
+    const result = db.updateStaffShift(req.params.staffId, shiftStart, shiftEnd, auth.user, req.params.shopId);
     if (result.ok && result.staff && result.staff.phone) {
       sendWhatsApp(result.staff.phone, `Hi ${result.staff.name}, your shift has been updated to ${shiftStart} - ${shiftEnd}.`)
         .catch(err => console.error('Shift notify failed:', err.message));
@@ -1135,7 +1124,7 @@ app.post('/api/:shopId/staff/:staffId/hours', async (req, res) => {
   try {
     getShop(req.params.shopId);
     const { todayHours, weekHours } = req.body || {};
-    const result = db.editStaffHours(req.params.staffId, todayHours, weekHours, auth.user);
+    const result = db.editStaffHours(req.params.staffId, todayHours, weekHours, auth.user, req.params.shopId);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1150,7 +1139,7 @@ app.post('/api/:shopId/staff/:staffId/create-login', async (req, res) => {
     getShop(req.params.shopId);
     const { username, password } = req.body || {};
     if (!username || !password) return res.status(400).json({ error: 'username and password required' });
-    const staff = db.getStaffById(req.params.staffId);
+    const staff = db.getStaffById(req.params.staffId, req.params.shopId);
     if (!staff) return res.status(404).json({ error: 'Staff not found' });
     const existing = db.getUserByUsername(username.trim());
     if (existing) return res.status(400).json({ error: 'Username already taken' });
@@ -1160,6 +1149,7 @@ app.post('/api/:shopId/staff/:staffId/create-login', async (req, res) => {
       passwordHash: hash,
       role: staff.role === 'boss' ? 'boss' : 'staff',
       staffId: staff.id,
+      shopId: req.params.shopId,
     });
     res.json(result);
   } catch (err) {
@@ -1174,7 +1164,7 @@ app.post('/api/:shopId/staff/:staffId/photo', async (req, res) => {
   try {
     getShop(req.params.shopId);
     const { photo } = req.body || {};
-    const result = db.setStaffPhoto(req.params.staffId, photo || '');
+    const result = db.setStaffPhoto(req.params.staffId, photo || '', req.params.shopId);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1186,7 +1176,7 @@ app.get('/api/:shopId/motorbikes/:bikeId/deposit', async (req, res) => {
   if (!auth.ok) return res.status(401).json({ error: 'Unauthorized' });
   try {
     getShop(req.params.shopId);
-    const deposit = db.getActiveDepositForPlate(req.params.bikeId);
+    const deposit = db.getActiveDepositForPlate(req.params.bikeId, req.params.shopId);
     res.json({ deposit: deposit || null });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1200,7 +1190,7 @@ app.post('/api/:shopId/deposits', async (req, res) => {
     getShop(req.params.shopId);
     const { plate, renterName, depositType, amount } = req.body || {};
     if (!plate || !depositType) return res.status(400).json({ error: 'plate and depositType are required' });
-    const result = db.collectDeposit({ plate, renterName, depositType, amount, collectedBy: auth.user });
+    const result = db.collectDeposit({ plate, renterName, depositType, amount, collectedBy: auth.user, shopId: req.params.shopId });
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1213,7 +1203,7 @@ app.post('/api/:shopId/deposits/:depositId/refund', async (req, res) => {
   try {
     getShop(req.params.shopId);
     const { amountRefunded, deductionReason } = req.body || {};
-    const result = db.refundDeposit(req.params.depositId, amountRefunded, deductionReason, auth.user);
+    const result = db.refundDeposit(req.params.depositId, amountRefunded, deductionReason, auth.user, req.params.shopId);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1226,7 +1216,7 @@ app.get('/api/:shopId/deposits', async (req, res) => {
   if (!isBossRole(auth)) return res.status(403).json({ error: 'Boss access only' });
   try {
     getShop(req.params.shopId);
-    const deposits = req.query.open === '1' ? db.getOpenDeposits() : db.getAllDeposits();
+    const deposits = req.query.open === '1' ? db.getOpenDeposits(req.params.shopId) : db.getAllDeposits(req.params.shopId);
     res.json({ deposits });
   } catch (err) {
     res.status(500).json({ error: err.message });
