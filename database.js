@@ -269,28 +269,28 @@ function migrateToCompositeKeys() {
 
 // ─── Motorbikes ────────────────────────────────────────────
 
-function getAllMotorbikes() {
+function getAllMotorbikes(shopId = 'toh') {
   const db = getDb();
-  return db.prepare('SELECT * FROM motorbikes ORDER BY model, plate').all();
+  return db.prepare('SELECT * FROM motorbikes WHERE shop_id = ? ORDER BY model, plate').all(shopId);
 }
 
-function getMotorbikeByPlate(plate) {
+function getMotorbikeByPlate(plate, shopId = 'toh') {
   const db = getDb();
-  const exact = db.prepare('SELECT * FROM motorbikes WHERE plate = ?').get(plate);
+  const exact = db.prepare('SELECT * FROM motorbikes WHERE plate = ? AND shop_id = ?').get(plate, shopId);
   if (exact) return exact;
   // Fallback: staff often type just the trailing number/code (e.g. "3990"
   // instead of "Honda Click 150 3990"). Match plates ending with that code.
   const query = String(plate).trim();
   if (!query) return null;
-  const matches = db.prepare('SELECT * FROM motorbikes WHERE plate LIKE ?').all('%' + query);
+  const matches = db.prepare('SELECT * FROM motorbikes WHERE plate LIKE ? AND shop_id = ?').all('%' + query, shopId);
   if (matches.length === 1) return matches[0];
   return null; // ambiguous (0 or 2+ matches) — treat as not found
 }
 
-function findMotorbikesByCode(plate) {
+function findMotorbikesByCode(plate, shopId = 'toh') {
   const db = getDb();
   const query = String(plate).trim();
-  return db.prepare('SELECT * FROM motorbikes WHERE plate LIKE ?').all('%' + query);
+  return db.prepare('SELECT * FROM motorbikes WHERE plate LIKE ? AND shop_id = ?').all('%' + query, shopId);
 }
 
 function upsertMotorbike(bike, shopId) {
@@ -305,17 +305,17 @@ function upsertMotorbike(bike, shopId) {
   `).run(b);
 }
 
-function updateBikeStatus(plate, status) {
+function updateBikeStatus(plate, status, shopId = 'toh') {
   const db = getDb();
   return db.prepare(`
     UPDATE motorbikes SET status = ?, updated_at = datetime('now','localtime')
-    WHERE plate = ?
-  `).run(status, plate);
+    WHERE plate = ? AND shop_id = ?
+  `).run(status, plate, shopId);
 }
 
-function getFleetAvailability() {
+function getFleetAvailability(shopId = 'toh') {
   const db = getDb();
-  const rows = db.prepare('SELECT model, status FROM motorbikes ORDER BY model').all();
+  const rows = db.prepare('SELECT model, status FROM motorbikes WHERE shop_id = ? ORDER BY model').all(shopId);
   const byType = {};
   rows.forEach(row => {
     const model = row.model.trim();
@@ -330,9 +330,9 @@ function getFleetAvailability() {
 
 // ─── Rentals ───────────────────────────────────────────────
 
-function createRental(rental) {
+function createRental(rental, shopId = 'toh') {
   const db = getDb();
-  const bike = getMotorbikeByPlate(rental.plate);
+  const bike = getMotorbikeByPlate(rental.plate, shopId);
   if (!bike) return { ok: false, message: `No bike found for plate "${rental.plate}"` };
   if (bike.status === 'Rented') return { ok: false, message: `${rental.plate} is already Rented` };
   if (bike.status === 'Maintenance') return { ok: false, message: `${rental.plate} is in Maintenance` };
@@ -340,24 +340,24 @@ function createRental(rental) {
 
   const doCreate = db.transaction((r) => {
     db.prepare(`
-      INSERT INTO rentals (plate, customer_name, customer_phone, start_date, end_date, price, status, logged_by, pickup_location)
-      VALUES (@plate, @customer_name, @customer_phone, @start_date, @end_date, @price, 'active', @logged_by, @pickup_location)
-    `).run({ pickup_location: '', ...r });
+      INSERT INTO rentals (shop_id, plate, customer_name, customer_phone, start_date, end_date, price, status, logged_by, pickup_location)
+      VALUES (@shop_id, @plate, @customer_name, @customer_phone, @start_date, @end_date, @price, 'active', @logged_by, @pickup_location)
+    `).run({ pickup_location: '', shop_id: shopId, ...r });
     db.prepare(`
       UPDATE motorbikes SET status = ?, updated_at = datetime('now','localtime')
-      WHERE plate = ?
-    `).run('Rented', r.plate);
+      WHERE plate = ? AND shop_id = ?
+    `).run('Rented', bike.plate, shopId);
   });
-  doCreate(rental);
+  doCreate({ ...rental, plate: bike.plate });
 
-  return { ok: true, plate: rental.plate, customer: rental.customer_name };
+  return { ok: true, plate: bike.plate, customer: rental.customer_name };
 }
 
-function completeRental(plate, price, loggedBy) {
+function completeRental(plate, price, loggedBy, shopId = 'toh') {
   const db = getDb();
   const active = db.prepare(`
-    SELECT * FROM rentals WHERE plate = ? AND status = 'active' ORDER BY id DESC LIMIT 1
-  `).get(plate);
+    SELECT * FROM rentals WHERE plate = ? AND shop_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1
+  `).get(plate, shopId);
 
   if (!active) return { ok: false, message: `No active rental found for ${plate}` };
 
@@ -375,74 +375,74 @@ function completeRental(plate, price, loggedBy) {
       .run('done', price || 0, active.id);
     db.prepare(`
       UPDATE motorbikes SET status = ?, updated_at = datetime('now','localtime')
-      WHERE plate = ?
-    `).run('Available', plate);
+      WHERE plate = ? AND shop_id = ?
+    `).run('Available', plate, shopId);
     db.prepare(`
-      INSERT INTO rental_history (date_logged, bike_id, model, renter_name, renter_phone, start_date, end_date, days, price, logged_by, pickup_location)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(today, plate, '', active.customer_name, active.customer_phone, startDate, endDate, days, finalPrice, loggedBy || '', active.pickup_location || '');
+      INSERT INTO rental_history (shop_id, date_logged, bike_id, model, renter_name, renter_phone, start_date, end_date, days, price, logged_by, pickup_location)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(shopId, today, plate, '', active.customer_name, active.customer_phone, startDate, endDate, days, finalPrice, loggedBy || '', active.pickup_location || '');
   });
   doComplete();
 
   return { ok: true, plate, customer: active.customer_name };
 }
 
-function getActiveRentals() {
+function getActiveRentals(shopId = 'toh') {
   const db = getDb();
   return db.prepare(`
     SELECT r.*, m.model, m.color
-    FROM rentals r LEFT JOIN motorbikes m ON r.plate = m.plate
-    WHERE r.status = 'active'
+    FROM rentals r LEFT JOIN motorbikes m ON r.plate = m.plate AND r.shop_id = m.shop_id
+    WHERE r.status = 'active' AND r.shop_id = ?
     ORDER BY r.start_date DESC
-  `).all();
+  `).all(shopId);
 }
 
-function getRentalsForDate(dateStr) {
+function getRentalsForDate(dateStr, shopId = 'toh') {
   const db = getDb();
   return db.prepare(`
     SELECT r.*, m.model, m.color
-    FROM rentals r LEFT JOIN motorbikes m ON r.plate = m.plate
-    WHERE ? BETWEEN r.start_date AND r.end_date
+    FROM rentals r LEFT JOIN motorbikes m ON r.plate = m.plate AND r.shop_id = m.shop_id
+    WHERE ? BETWEEN r.start_date AND r.end_date AND r.shop_id = ?
     ORDER BY r.start_date DESC
-  `).all(dateStr);
+  `).all(dateStr, shopId);
 }
 
 // ─── Bookings ──────────────────────────────────────────────
 
-function appendBooking(data) {
+function appendBooking(data, shopId = 'toh') {
   const db = getDb();
   const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
   db.prepare(`
-    INSERT INTO bookings (date, customer_name, phone, bike_type, start_date, end_date, location, price, source)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(now, data.name || '', data.phone || '', data.bike || '', data.startDate || '', data.endDate || '', data.location || '', data.price || '', data.source || 'WhatsApp Bot');
+    INSERT INTO bookings (shop_id, date, customer_name, phone, bike_type, start_date, end_date, location, price, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(shopId, now, data.name || '', data.phone || '', data.bike || '', data.startDate || '', data.endDate || '', data.location || '', data.price || '', data.source || 'WhatsApp Bot');
 }
 
-function getTodayBookings() {
+function getTodayBookings(shopId = 'toh') {
   const db = getDb();
   const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok' });
-  return db.prepare('SELECT * FROM bookings WHERE date LIKE ? ORDER BY date DESC').all(today + '%');
+  return db.prepare('SELECT * FROM bookings WHERE date LIKE ? AND shop_id = ? ORDER BY date DESC').all(today + '%', shopId);
 }
 
-function getRecentBookings(limit = 10) {
+function getRecentBookings(limit = 10, shopId = 'toh') {
   const db = getDb();
-  return db.prepare('SELECT * FROM bookings ORDER BY id DESC LIMIT ?').all(limit);
+  return db.prepare('SELECT * FROM bookings WHERE shop_id = ? ORDER BY id DESC LIMIT ?').all(shopId, limit);
 }
 
 // ─── Finance ────────────────────────────────────────────────
 
-function logFinance(type, bike, amount, description, reportedBy, status) {
+function logFinance(type, bike, amount, description, reportedBy, status, shopId = 'toh') {
   const db = getDb();
   const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
   db.prepare(`
-    INSERT INTO finance (date, type, bike, amount, description, reported_by, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(now, type, bike || '-', amount, description || '-', reportedBy || 'WhatsApp Bot', status || 'Confirmed');
+    INSERT INTO finance (shop_id, date, type, bike, amount, description, reported_by, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(shopId, now, type, bike || '-', amount, description || '-', reportedBy || 'WhatsApp Bot', status || 'Confirmed');
 }
 
-function getFinanceSummary() {
+function getFinanceSummary(shopId = 'toh') {
   const db = getDb();
-  const rows = db.prepare('SELECT type, amount, status FROM finance').all();
+  const rows = db.prepare('SELECT type, amount, status FROM finance WHERE shop_id = ?').all(shopId);
   let income = 0, expense = 0;
   rows.forEach(r => {
     const t = (r.type || '').trim().toLowerCase();
@@ -453,11 +453,11 @@ function getFinanceSummary() {
   return { income, expense, net: income - expense, count: rows.length };
 }
 
-function getPendingPayments() {
+function getPendingPayments(shopId = 'toh') {
   const db = getDb();
   return db.prepare(`
-    SELECT * FROM finance WHERE type = 'Income' AND status = 'Pending' ORDER BY id DESC
-  `).all();
+    SELECT * FROM finance WHERE type = 'Income' AND status = 'Pending' AND shop_id = ? ORDER BY id DESC
+  `).all(shopId);
 }
 
 // ─── Conversations (chat memory) ────────────────────────────
@@ -503,18 +503,18 @@ function markMessageProcessed(messageId) {
 
 // ─── Tasks ──────────────────────────────────────────────────
 
-function logTask(type, description, contact) {
+function logTask(type, description, contact, shopId = 'toh') {
   const db = getDb();
   const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
   db.prepare(`
-    INSERT INTO tasks (date, type, description, contact, status)
-    VALUES (?, ?, ?, ?, 'Open')
-  `).run(now, type, description || '-', contact || '-');
+    INSERT INTO tasks (shop_id, date, type, description, contact, status)
+    VALUES (?, ?, ?, ?, ?, 'Open')
+  `).run(shopId, now, type, description || '-', contact || '-');
 }
 
-function getTasks() {
+function getTasks(shopId = 'toh') {
   const db = getDb();
-  const rows = db.prepare('SELECT rowid as id, * FROM tasks ORDER BY id DESC').all();
+  const rows = db.prepare('SELECT rowid as id, * FROM tasks WHERE shop_id = ? ORDER BY id DESC').all(shopId);
   return rows.map(r => ({
     id: r.id,
     date: r.date,
@@ -526,51 +526,51 @@ function getTasks() {
   }));
 }
 
-function resolveTask(taskId) {
+function resolveTask(taskId, shopId = 'toh') {
   const db = getDb();
   const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
-  db.prepare('UPDATE tasks SET status = ?, resolved_at = ? WHERE rowid = ?').run('Resolved', now, taskId);
+  db.prepare('UPDATE tasks SET status = ?, resolved_at = ? WHERE rowid = ? AND shop_id = ?').run('Resolved', now, taskId, shopId);
   return { ok: true };
 }
 
 // ─── Rental History ────────────────────────────────────────
 
-function getRentalHistoryForBike(plate) {
+function getRentalHistoryForBike(plate, shopId = 'toh') {
   const db = getDb();
-  return db.prepare('SELECT * FROM rental_history WHERE bike_id = ? ORDER BY id DESC').all(plate);
+  return db.prepare('SELECT * FROM rental_history WHERE bike_id = ? AND shop_id = ? ORDER BY id DESC').all(plate, shopId);
 }
 
-function getAllRentalHistory() {
+function getAllRentalHistory(shopId = 'toh') {
   const db = getDb();
-  return db.prepare('SELECT * FROM rental_history ORDER BY id DESC').all();
+  return db.prepare('SELECT * FROM rental_history WHERE shop_id = ? ORDER BY id DESC').all(shopId);
 }
 
 // ─── Photos ─────────────────────────────────────────────────
 
-function logPhoto(phone, mediaId, mimeType) {
+function logPhoto(phone, mediaId, mimeType, shopId = 'toh') {
   const db = getDb();
   const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
-  db.prepare('INSERT INTO photos (date, phone, media_id, mime_type) VALUES (?, ?, ?, ?)')
-    .run(now, phone, mediaId, mimeType || 'image/jpeg');
+  db.prepare('INSERT INTO photos (shop_id, date, phone, media_id, mime_type) VALUES (?, ?, ?, ?, ?)')
+    .run(shopId, now, phone, mediaId, mimeType || 'image/jpeg');
 }
 
-function getRecentPhotos(limit = 10) {
+function getRecentPhotos(limit = 10, shopId = 'toh') {
   const db = getDb();
-  return db.prepare('SELECT * FROM photos ORDER BY id DESC LIMIT ?').all(limit);
+  return db.prepare('SELECT * FROM photos WHERE shop_id = ? ORDER BY id DESC LIMIT ?').all(shopId, limit);
 }
 
 // ─── Dashboard Stats ───────────────────────────────────────
 
-function getDashboardStats() {
+function getDashboardStats(shopId = 'toh') {
   const db = getDb();
-  const activeRentals = db.prepare("SELECT COUNT(*) as c FROM rentals WHERE status = 'active'").get().c;
-  const available = db.prepare("SELECT COUNT(*) as c FROM motorbikes WHERE status = 'Available'").get().c;
-  const rented = db.prepare("SELECT COUNT(*) as c FROM motorbikes WHERE status = 'Rented'").get().c;
-  const maintenance = db.prepare("SELECT COUNT(*) as c FROM motorbikes WHERE status = 'Maintenance'").get().c;
-  const openTasks = db.prepare("SELECT COUNT(*) as c FROM tasks WHERE status = 'Open'").get().c;
+  const activeRentals = db.prepare("SELECT COUNT(*) as c FROM rentals WHERE status = 'active' AND shop_id = ?").get(shopId).c;
+  const available = db.prepare("SELECT COUNT(*) as c FROM motorbikes WHERE status = 'Available' AND shop_id = ?").get(shopId).c;
+  const rented = db.prepare("SELECT COUNT(*) as c FROM motorbikes WHERE status = 'Rented' AND shop_id = ?").get(shopId).c;
+  const maintenance = db.prepare("SELECT COUNT(*) as c FROM motorbikes WHERE status = 'Maintenance' AND shop_id = ?").get(shopId).c;
+  const openTasks = db.prepare("SELECT COUNT(*) as c FROM tasks WHERE status = 'Open' AND shop_id = ?").get(shopId).c;
   const today = new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok' });
-  const todayBookings = db.prepare('SELECT COUNT(*) as c FROM bookings WHERE date LIKE ?').get(today + '%').c;
-  const finance = getFinanceSummary();
+  const todayBookings = db.prepare('SELECT COUNT(*) as c FROM bookings WHERE date LIKE ? AND shop_id = ?').get(today + '%', shopId).c;
+  const finance = getFinanceSummary(shopId);
 
   return {
     activeRentals,
@@ -586,14 +586,14 @@ function getDashboardStats() {
 
 // ─── Staff ──────────────────────────────────────────────────
 
-function getAllStaff() {
+function getAllStaff(shopId = 'toh') {
   const db = getDb();
-  return db.prepare('SELECT * FROM staff ORDER BY role DESC, name').all();
+  return db.prepare('SELECT * FROM staff WHERE shop_id = ? ORDER BY role DESC, name').all(shopId);
 }
 
-function getStaffById(id) {
+function getStaffById(id, shopId = 'toh') {
   const db = getDb();
-  return db.prepare('SELECT * FROM staff WHERE id = ?').get(id);
+  return db.prepare('SELECT * FROM staff WHERE id = ? AND shop_id = ?').get(id, shopId);
 }
 
 function normalizeThaiPhone(phone) {
@@ -604,42 +604,42 @@ function normalizeThaiPhone(phone) {
   return digits;
 }
 
-function getStaffByPhone(phone) {
+function getStaffByPhone(phone, shopId = 'toh') {
   const db = getDb();
   const target = normalizeThaiPhone(phone);
   if (!target) return null;
-  const all = db.prepare('SELECT * FROM staff').all();
+  const all = db.prepare('SELECT * FROM staff WHERE shop_id = ?').all(shopId);
   return all.find(s => normalizeThaiPhone(s.phone) === target) || null;
 }
 
-function addStaff({ name, phone, role, shiftStart, shiftEnd }) {
+function addStaff({ name, phone, role, shiftStart, shiftEnd, shopId = 'toh' }) {
   const db = getDb();
   const info = db.prepare(`
-    INSERT INTO staff (name, phone, role, shift_start, shift_end, status)
-    VALUES (?, ?, ?, ?, ?, 'inactive')
-  `).run(name, phone || '', role, shiftStart || '08:00', shiftEnd || '18:00');
+    INSERT INTO staff (shop_id, name, phone, role, shift_start, shift_end, status)
+    VALUES (?, ?, ?, ?, ?, ?, 'inactive')
+  `).run(shopId, name, phone || '', role, shiftStart || '08:00', shiftEnd || '18:00');
   return { ok: true, id: info.lastInsertRowid };
 }
 
-function removeStaff(id) {
+function removeStaff(id, shopId = 'toh') {
   const db = getDb();
-  db.prepare('DELETE FROM staff WHERE id = ?').run(id);
+  db.prepare('DELETE FROM staff WHERE id = ? AND shop_id = ?').run(id, shopId);
   return { ok: true };
 }
 
-function checkInStaff(id) {
+function checkInStaff(id, shopId = 'toh') {
   const db = getDb();
-  const staff = getStaffById(id);
+  const staff = getStaffById(id, shopId);
   if (!staff) return { ok: false, message: 'Staff not found' };
   const now = new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
-  db.prepare(`UPDATE staff SET status='active', check_in_at=?, updated_at=datetime('now','localtime') WHERE id=?`).run(now, id);
+  db.prepare(`UPDATE staff SET status='active', check_in_at=?, updated_at=datetime('now','localtime') WHERE id=? AND shop_id=?`).run(now, id, shopId);
   const late = now > staff.shift_start;
   return { ok: true, checkIn: now, late };
 }
 
-function checkOutStaff(id) {
+function checkOutStaff(id, shopId = 'toh') {
   const db = getDb();
-  const staff = getStaffById(id);
+  const staff = getStaffById(id, shopId);
   if (!staff) return { ok: false, message: 'Staff not found' };
   let hoursToday = 0;
   if (staff.check_in_at) {
@@ -651,42 +651,42 @@ function checkOutStaff(id) {
   const newWeekHours = Math.round((staff.week_hours + hoursToday) * 10) / 10;
   db.prepare(`
     UPDATE staff SET status='inactive', check_in_at='', today_hours=0, week_hours=?, updated_at=datetime('now','localtime')
-    WHERE id=?
-  `).run(newWeekHours, id);
+    WHERE id=? AND shop_id=?
+  `).run(newWeekHours, id, shopId);
   return { ok: true, hoursToday, weekHours: newWeekHours };
 }
 
-function setStaffLeave(id) {
+function setStaffLeave(id, shopId = 'toh') {
   const db = getDb();
-  db.prepare(`UPDATE staff SET status='leave', check_in_at='', updated_at=datetime('now','localtime') WHERE id=?`).run(id);
+  db.prepare(`UPDATE staff SET status='leave', check_in_at='', updated_at=datetime('now','localtime') WHERE id=? AND shop_id=?`).run(id, shopId);
   return { ok: true };
 }
 
-function updateStaffShift(id, shiftStart, shiftEnd, editedBy) {
+function updateStaffShift(id, shiftStart, shiftEnd, editedBy, shopId = 'toh') {
   const db = getDb();
-  const staff = getStaffById(id);
+  const staff = getStaffById(id, shopId);
   if (!staff) return { ok: false, message: 'Staff not found' };
-  db.prepare(`UPDATE staff SET shift_start=?, shift_end=?, updated_at=datetime('now','localtime') WHERE id=?`)
-    .run(shiftStart, shiftEnd, id);
-  db.prepare(`INSERT INTO staff_edits (staff_id, field, old_value, new_value, edited_by) VALUES (?, 'shift', ?, ?, ?)`)
-    .run(id, `${staff.shift_start}-${staff.shift_end}`, `${shiftStart}-${shiftEnd}`, editedBy || '');
-  return { ok: true, staff: getStaffById(id) };
+  db.prepare(`UPDATE staff SET shift_start=?, shift_end=?, updated_at=datetime('now','localtime') WHERE id=? AND shop_id=?`)
+    .run(shiftStart, shiftEnd, id, shopId);
+  db.prepare(`INSERT INTO staff_edits (shop_id, staff_id, field, old_value, new_value, edited_by) VALUES (?, ?, 'shift', ?, ?, ?)`)
+    .run(shopId, id, `${staff.shift_start}-${staff.shift_end}`, `${shiftStart}-${shiftEnd}`, editedBy || '');
+  return { ok: true, staff: getStaffById(id, shopId) };
 }
 
-function editStaffHours(id, todayHours, weekHours, editedBy) {
+function editStaffHours(id, todayHours, weekHours, editedBy, shopId = 'toh') {
   const db = getDb();
-  const staff = getStaffById(id);
+  const staff = getStaffById(id, shopId);
   if (!staff) return { ok: false, message: 'Staff not found' };
-  db.prepare(`UPDATE staff SET today_hours=?, week_hours=?, updated_at=datetime('now','localtime') WHERE id=?`)
-    .run(todayHours, weekHours, id);
-  db.prepare(`INSERT INTO staff_edits (staff_id, field, old_value, new_value, edited_by) VALUES (?, 'hours', ?, ?, ?)`)
-    .run(id, `${staff.today_hours}/${staff.week_hours}`, `${todayHours}/${weekHours}`, editedBy || '');
+  db.prepare(`UPDATE staff SET today_hours=?, week_hours=?, updated_at=datetime('now','localtime') WHERE id=? AND shop_id=?`)
+    .run(todayHours, weekHours, id, shopId);
+  db.prepare(`INSERT INTO staff_edits (shop_id, staff_id, field, old_value, new_value, edited_by) VALUES (?, ?, 'hours', ?, ?, ?)`)
+    .run(shopId, id, `${staff.today_hours}/${staff.week_hours}`, `${todayHours}/${weekHours}`, editedBy || '');
   return { ok: true };
 }
 
-function setStaffPhoto(id, photoDataUrl) {
+function setStaffPhoto(id, photoDataUrl, shopId = 'toh') {
   const db = getDb();
-  const staff = getStaffById(id);
+  const staff = getStaffById(id, shopId);
   if (!staff) return { ok: false, message: 'Staff not found' };
   if (photoDataUrl && !/^data:image\/(jpeg|jpg|png|webp);base64,/.test(photoDataUrl)) {
     return { ok: false, message: 'Invalid image format' };
@@ -694,36 +694,36 @@ function setStaffPhoto(id, photoDataUrl) {
   if (photoDataUrl && photoDataUrl.length > 700000) {
     return { ok: false, message: 'Image too large (max ~500KB)' };
   }
-  db.prepare(`UPDATE staff SET photo=?, updated_at=datetime('now','localtime') WHERE id=?`)
-    .run(photoDataUrl || '', id);
+  db.prepare(`UPDATE staff SET photo=?, updated_at=datetime('now','localtime') WHERE id=? AND shop_id=?`)
+    .run(photoDataUrl || '', id, shopId);
   return { ok: true };
 }
 
 // ─── Deposits ───────────────────────────────────────────────
 
-function collectDeposit({ plate, rentalId, renterName, depositType, amount, collectedBy }) {
+function collectDeposit({ plate, rentalId, renterName, depositType, amount, collectedBy, shopId = 'toh' }) {
   const db = getDb();
   if (!['passport', 'cash'].includes(depositType)) {
     return { ok: false, message: 'Deposit type must be passport or cash' };
   }
   const amt = depositType === 'cash' ? (parseFloat(amount) || 0) : 0;
   const info = db.prepare(`
-    INSERT INTO deposits (plate, rental_id, renter_name, deposit_type, amount_collected, status, collected_by)
-    VALUES (?, ?, ?, ?, ?, 'held', ?)
-  `).run(plate, rentalId || null, renterName || '', depositType, amt, collectedBy || '');
+    INSERT INTO deposits (shop_id, plate, rental_id, renter_name, deposit_type, amount_collected, status, collected_by)
+    VALUES (?, ?, ?, ?, ?, ?, 'held', ?)
+  `).run(shopId, plate, rentalId || null, renterName || '', depositType, amt, collectedBy || '');
   return { ok: true, id: info.lastInsertRowid };
 }
 
-function getActiveDepositForPlate(plate) {
+function getActiveDepositForPlate(plate, shopId = 'toh') {
   const db = getDb();
   return db.prepare(`
-    SELECT * FROM deposits WHERE plate = ? AND status = 'held' ORDER BY id DESC LIMIT 1
-  `).get(plate);
+    SELECT * FROM deposits WHERE plate = ? AND status = 'held' AND shop_id = ? ORDER BY id DESC LIMIT 1
+  `).get(plate, shopId);
 }
 
-function refundDeposit(depositId, amountRefunded, deductionReason, refundedBy) {
+function refundDeposit(depositId, amountRefunded, deductionReason, refundedBy, shopId = 'toh') {
   const db = getDb();
-  const deposit = db.prepare('SELECT * FROM deposits WHERE id = ?').get(depositId);
+  const deposit = db.prepare('SELECT * FROM deposits WHERE id = ? AND shop_id = ?').get(depositId, shopId);
   if (!deposit) return { ok: false, message: 'Deposit not found' };
   const refund = Math.max(0, Math.min(parseFloat(amountRefunded) || 0, deposit.amount_collected));
   const status = refund >= deposit.amount_collected && deposit.amount_collected > 0 ? 'returned'
@@ -732,19 +732,19 @@ function refundDeposit(depositId, amountRefunded, deductionReason, refundedBy) {
   const now = new Date().toLocaleString('en-GB', { timeZone: 'Asia/Bangkok' });
   db.prepare(`
     UPDATE deposits SET amount_refunded=?, status=?, deduction_reason=?, refunded_by=?, refunded_at=?
-    WHERE id=?
-  `).run(refund, status, deductionReason || '', refundedBy || '', now, depositId);
+    WHERE id=? AND shop_id=?
+  `).run(refund, status, deductionReason || '', refundedBy || '', now, depositId, shopId);
   return { ok: true, status };
 }
 
-function getOpenDeposits() {
+function getOpenDeposits(shopId = 'toh') {
   const db = getDb();
-  return db.prepare(`SELECT * FROM deposits WHERE status = 'held' ORDER BY id DESC`).all();
+  return db.prepare(`SELECT * FROM deposits WHERE status = 'held' AND shop_id = ? ORDER BY id DESC`).all(shopId);
 }
 
-function getAllDeposits() {
+function getAllDeposits(shopId = 'toh') {
   const db = getDb();
-  return db.prepare(`SELECT * FROM deposits ORDER BY id DESC`).all();
+  return db.prepare(`SELECT * FROM deposits WHERE shop_id = ? ORDER BY id DESC`).all(shopId);
 }
 
 // ─── Users (login) ───────────────────────────────────────────
@@ -759,12 +759,12 @@ function getUserById(id) {
   return db.prepare('SELECT * FROM users WHERE id = ?').get(id);
 }
 
-function createUser({ username, passwordHash, role, staffId }) {
+function createUser({ username, passwordHash, role, staffId, shopId = 'toh' }) {
   const db = getDb();
   const info = db.prepare(`
-    INSERT INTO users (username, password_hash, role, staff_id)
-    VALUES (?, ?, ?, ?)
-  `).run(username, passwordHash, role, staffId || null);
+    INSERT INTO users (shop_id, username, password_hash, role, staff_id)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(shopId, username, passwordHash, role, staffId || null);
   return { ok: true, id: info.lastInsertRowid };
 }
 
@@ -774,18 +774,19 @@ function updateUserLastLogin(id) {
   db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(now, id);
 }
 
-function getAllUsers() {
+function getAllUsers(shopId = 'toh') {
   const db = getDb();
   return db.prepare(`
     SELECT u.id, u.username, u.role, u.last_login_at, s.name as staff_name
-    FROM users u LEFT JOIN staff s ON u.staff_id = s.id
+    FROM users u LEFT JOIN staff s ON u.staff_id = s.id AND u.shop_id = s.shop_id
+    WHERE u.shop_id = ?
     ORDER BY u.role DESC, u.username
-  `).all();
+  `).all(shopId);
 }
 
-function deleteUser(id) {
+function deleteUser(id, shopId = 'toh') {
   const db = getDb();
-  db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  db.prepare('DELETE FROM users WHERE id = ? AND shop_id = ?').run(id, shopId);
   return { ok: true };
 }
 
